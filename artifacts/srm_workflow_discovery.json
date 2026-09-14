@@ -1,0 +1,121 @@
+{
+  "target_portal": "https://dld.srmist.edu.in",
+  "campus_selected": "Kattankulathur (KTR)",
+  "faculty_selected": "Faculty of Engineering & Technology",
+  "portal_resolved_url": "https://dld.srmist.edu.in/ktretecurricula/#/",
+  "api_base_url": "https://dld.srmist.edu.in/ktretecurricula/server",
+  "questions_server_url": "https://dld.srmist.edu.in/etecurricula/server",
+  "static_key_parameter": "[REDACTED_CONFIG_KEY]",
+  "timestamp": "2026-09-14T17:55:00Z",
+  "classification_summary": {
+    "DIRECT_HTTP_POSSIBLE": [
+      "Semester & Course Discovery",
+      "Session & Question Retrieval",
+      "Session Status & Worksheet Metadata",
+      "Worksheet File Download Path Resolution",
+      "Worksheet Link Submission (UPDATE Action)",
+      "Student Profile & Timetable"
+    ],
+    "BROWSER_REQUIRED": [
+      "Client-side Canvas CAPTCHA Rendering & Capture"
+    ],
+    "UNKNOWN": []
+  },
+  "operations": [
+    {
+      "operation": "A. eCurricula Navigation",
+      "classification": "DIRECT_HTTP_POSSIBLE",
+      "target_url": "https://dld.srmist.edu.in/ktretecurricula/#/",
+      "method": "GET",
+      "rationale": "Static mapping: Campus 'KTR' + Faculty 'Engineering & Technology' deterministically points to /ktretecurricula. No browser automation required to resolve this URL.",
+      "request_fields": [],
+      "response_fields": ["HTML/JS SPA Bundle"]
+    },
+    {
+      "operation": "B. Authentication & Login",
+      "classification": "BROWSER_REQUIRED",
+      "endpoint": "/curricula/login",
+      "method": "POST",
+      "rationale": "The login page generates a 6-digit numeric CAPTCHA drawn dynamically onto an HTML5 canvas. While the subsequent login request is a pure JSON POST, initial capture and display of the CAPTCHA requires headless browser inspection or user UI intervention.",
+      "request_fields": ["USER_ID", "PASSWORD", "key"],
+      "response_fields": ["Status", "token", "user", "msg"]
+    },
+    {
+      "operation": "C. Semester Loading",
+      "classification": "DIRECT_HTTP_POSSIBLE",
+      "endpoint": "/curricula/student/home/getcourses",
+      "method": "POST",
+      "rationale": "Direct HTTP POST returning all enrolled courses. Each course object contains a SEMESTER integer (e.g., 3). Filtering by Semester 3 is executed in-memory.",
+      "request_fields": ["USER_ID", "key"],
+      "response_fields": ["Status", "courses", "batches"]
+    },
+    {
+      "operation": "D. Subject / Course Loading",
+      "classification": "DIRECT_HTTP_POSSIBLE",
+      "endpoint": "/curricula/student/home/getcourses",
+      "method": "POST",
+      "rationale": "Direct HTTP POST returning courses array containing COURSE_CODE, COURSE_NAME, BATCH_ID, DEPARTMENT, and SEMESTER.",
+      "request_fields": ["USER_ID", "key"],
+      "response_fields": ["Status", "courses", "batches"]
+    },
+    {
+      "operation": "E. Session & Question Loading",
+      "classification": "DIRECT_HTTP_POSSIBLE",
+      "endpoint": "/curricula/student/session/getquestions",
+      "method": "POST",
+      "rationale": "Direct HTTP POST returning structured session question components (MCQ, Short Questions, Long Questions, Videos, SLO).",
+      "request_fields": ["COURSE_CODE", "COURSE_INFO", "SESSION", "key", "MCQ", "SQ", "LQ"],
+      "response_fields": ["Status", "mcq", "sq", "lq", "video", "slo", "sp"]
+    },
+    {
+      "operation": "F. Worksheet Metadata & Status",
+      "classification": "DIRECT_HTTP_POSSIBLE",
+      "endpoint": "/curricula/student/session/getsessionstatus",
+      "method": "POST",
+      "rationale": "Direct HTTP POST returning session completion state, PRACTICE status dictionary, and SLOLINK submitted URLs dictionary.",
+      "request_fields": ["USER_ID", "FULL_NAME", "DEPARTMENT", "COURSE_INFO", "SESSION", "key"],
+      "response_fields": ["Status", "result", "SKILLQ_SLO1", "SKILLQ_SLO2"]
+    },
+    {
+      "operation": "G. Worksheet Download",
+      "classification": "DIRECT_HTTP_POSSIBLE",
+      "endpoint": "/curricula/admin/file/getfile",
+      "method": "POST",
+      "rationale": "Direct HTTP POST passing path, filename, and server. Returns direct download URL under result.path which can be retrieved via HTTP GET.",
+      "request_fields": ["path", "filename", "server", "key"],
+      "response_fields": ["Status", "result.path", "msg"]
+    },
+    {
+      "operation": "H. Worksheet Submission & UPDATE Action",
+      "classification": "DIRECT_HTTP_POSSIBLE",
+      "endpoint": "/curricula/student/session/submitlink",
+      "method": "POST",
+      "rationale": "Direct HTTP POST that executes the UPDATE action. Accepts view and download links (e.g., Google Drive), session identifier, course details, and student ID.",
+      "request_fields": [
+        "view",
+        "download",
+        "fileId",
+        "session",
+        "SESSION",
+        "SLO",
+        "course_code",
+        "course_name",
+        "BATCH_ID",
+        "USER_ID",
+        "FULL_NAME",
+        "DEPARTMENT"
+      ],
+      "response_fields": ["Status", "msg", "link"]
+    },
+    {
+      "operation": "I. Frontend API Communication Layer",
+      "classification": "DIRECT_HTTP_POSSIBLE",
+      "endpoint": "All /curricula/* endpoints",
+      "method": "POST",
+      "rationale": "Frontend exclusively uses Axios POST requests with JSON payloads and Bearer token in the Authorization header. No proprietary browser socket or opaque binary protocol is used.",
+      "request_fields": ["*"],
+      "response_fields": ["*"]
+    }
+  ],
+  "sanitization_notice": "All sensitive values, passwords, personal tokens, authorization headers, and cookie data have been completely redacted from this report."
+}
