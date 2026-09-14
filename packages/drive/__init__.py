@@ -1,9 +1,31 @@
-"""Google Drive integration package scaffold.
+"""Google Drive integration package.
 
-Future implementation will handle OAuth 2.0 token management, folder sync,
-and worksheet document storage.
+Provides OAuth 2.0 authorization, secure document upload, public reader
+permission configuration, and shareable URL verification for completed worksheets.
 """
 
-from packages.drive.client import GoogleDriveClient
+from packages.drive.client import BaseDriveClient, GoogleDriveClient
+from packages.drive.exceptions import (
+    DriveAuthenticationError,
+    DriveException,
+    DriveFileNotFoundError,
+    DrivePermissionError,
+    DriveTokenExpiredError,
+    DriveUploadError,
+    DriveVerificationError,
+)
+from packages.drive.models import DriveFileMetadata, OAuthTokens
 
-__all__ = ["GoogleDriveClient"]
+__all__ = [
+    "BaseDriveClient",
+    "GoogleDriveClient",
+    "DriveFileMetadata",
+    "OAuthTokens",
+    "DriveException",
+    "DriveAuthenticationError",
+    "DriveTokenExpiredError",
+    "DriveUploadError",
+    "DrivePermissionError",
+    "DriveVerificationError",
+    "DriveFileNotFoundError",
+]

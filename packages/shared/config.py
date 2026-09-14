@@ -28,10 +28,13 @@ class Settings(BaseSettings):
     SRM_ARTIFACTS_DIR: str = "artifacts/browser"
     SRM_DOWNLOAD_DIR: str = "artifacts/downloads"
 
-    # Google Drive OAuth (future placeholder)
+    # Google Drive OAuth (OAuth 2.0 User Authorization)
     GOOGLE_DRIVE_CLIENT_ID: Optional[str] = None
     GOOGLE_DRIVE_CLIENT_SECRET: Optional[str] = None
     GOOGLE_DRIVE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/google/callback"
+    GOOGLE_DRIVE_ACCESS_TOKEN: Optional[str] = None
+    GOOGLE_DRIVE_REFRESH_TOKEN: Optional[str] = None
+    GOOGLE_DRIVE_FOLDER_ID: Optional[str] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
