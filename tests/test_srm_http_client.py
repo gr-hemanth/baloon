@@ -1,0 +1,345 @@
+import asyncio
+import json
+import logging
+from pathlib import Path
+from unittest.mock import AsyncMock, patch, MagicMock
+import httpx
+import pytest
+
+from packages.srm.http_client import SRMHttpClient
+from packages.srm.models import SRMCourse, SRMQuestionSet, SRMSessionStatus, SRMSubmissionResult
+from packages.srm.exceptions import (
+    AuthenticationFailed,
+    WorksheetNotFound,
+    DownloadFailed,
+    SubmissionFailed,
+    VerificationFailed,
+    Unauthorized,
+    InvalidSession,
+)
+
+
+@pytest.fixture
+def http_client():
+    return SRMHttpClient(base_url="https://dld.srmist.edu.in", key="john", max_retries=2)
+
+
+@pytest.mark.asyncio
+async def test_authentication_success(http_client: SRMHttpClient):
+    """Verify successful authentication stores JWT in-memory and sets user context."""
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 1,
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.mock_token_abc",
+        "user": {
+            "USER_ID": "RA2111003010001",
+            "FULL_NAME": "Test Student",
+            "DEPARTMENT": "CINTEL",
+            "ROLE": "S",
+        }
+    }
+
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        result = await http_client.authenticate({
+            "username": "RA2111003010001",
+            "password": "SecretPassword123"
+        })
+
+        assert result is True
+        assert http_client.is_authenticated is True
+        assert http_client._jwt_token == "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.mock_token_abc"
+        assert http_client._user_id == "RA2111003010001"
+        assert http_client._user_data["DEPARTMENT"] == "CINTEL"
+
+
+@pytest.mark.asyncio
+async def test_authentication_failure(http_client: SRMHttpClient):
+    """Verify invalid credentials raise AuthenticationFailed."""
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 0,
+        "msg": "Invalid Username or Password"
+    }
+
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        with pytest.raises(AuthenticationFailed) as exc_info:
+            await http_client.authenticate({
+                "username": "BAD_USER",
+                "password": "WRONG_PASSWORD"
+            })
+
+        assert "Invalid Username or Password" in str(exc_info.value)
+        assert http_client.is_authenticated is False
+        assert http_client._jwt_token is None
+
+
+@pytest.mark.asyncio
+async def test_course_retrieval_and_semester_filtering(http_client: SRMHttpClient):
+    """Verify get_courses parses course records and get_courses_by_semester filters correctly."""
+    http_client._jwt_token = "mock_jwt"
+    http_client._user_id = "RA2111003010001"
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 1,
+        "courses": [
+            {"COURSE_CODE": "21CSC301J", "COURSE_NAME": "OS", "SEMESTER": 3, "BATCH_ID": "B1", "DEPARTMENT": "CSE"},
+            {"COURSE_CODE": "21CSC302J", "COURSE_NAME": "DBMS", "SEMESTER": 3, "BATCH_ID": "B1", "DEPARTMENT": "CSE"},
+            {"COURSE_CODE": "21CSC401J", "COURSE_NAME": "AI", "SEMESTER": 4, "BATCH_ID": "B2", "DEPARTMENT": "CSE"},
+        ]
+    }
+
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        all_courses = await http_client.get_courses()
+        assert len(all_courses) == 3
+        assert all_courses[0].course_code == "21CSC301J"
+        assert all_courses[0].semester == 3
+
+        sem3_courses = await http_client.get_courses_by_semester(3)
+        assert len(sem3_courses) == 2
+        assert {c.course_code for c in sem3_courses} == {"21CSC301J", "21CSC302J"}
+
+        sem4_courses = await http_client.get_courses_by_semester(4)
+        assert len(sem4_courses) == 1
+        assert sem4_courses[0].course_code == "21CSC401J"
+
+
+@pytest.mark.asyncio
+async def test_question_retrieval(http_client: SRMHttpClient):
+    """Verify get_questions parses MCQ, Short, and Long questions."""
+    http_client._jwt_token = "mock_jwt"
+    http_client._user_id = "RA2111003010001"
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 1,
+        "mcq": [{"qid": 1, "q": "What is OS?"}],
+        "sq": [{"qid": 2, "q": "Define thread"}],
+        "lq": [{"qid": 3, "q": "Explain paging"}],
+        "slo": {"name": "SLO 1"},
+        "sp": {"plan": "Session 1"},
+    }
+
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        q_set = await http_client.get_questions(
+            course_code="21CSC301J",
+            batch_id="B1",
+            session=1
+        )
+        assert isinstance(q_set, SRMQuestionSet)
+        assert len(q_set.mcq) == 1
+        assert len(q_set.sq) == 1
+        assert len(q_set.lq) == 1
+        assert q_set.session == 1
+
+
+@pytest.mark.asyncio
+async def test_session_status_retrieval(http_client: SRMHttpClient):
+    """Verify get_session_status parses practice status and links."""
+    http_client._jwt_token = "mock_jwt"
+    http_client._user_id = "RA2111003010001"
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 1,
+        "result": {
+            "PRACTICE": {"11": 1},
+            "SLOLINK": {"11": "https://drive.google.com/file/d/test1/view"}
+        },
+        "SKILLQ_SLO1": "1",
+        "SKILLQ_SLO2": "0"
+    }
+
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        status = await http_client.get_session_status(
+            course_info={"BATCH_ID": "B1"},
+            session=1
+        )
+        assert isinstance(status, SRMSessionStatus)
+        assert status.practice_status["11"] == 1
+        assert status.slo_links["11"] == "https://drive.google.com/file/d/test1/view"
+
+
+@pytest.mark.asyncio
+async def test_worksheet_file_lookup_and_download(http_client: SRMHttpClient, tmp_path: Path):
+    """Verify get_worksheet_file resolves path and download_worksheet retrieves document."""
+    http_client._jwt_token = "mock_jwt"
+
+    # 1. Lookup
+    mock_lookup_resp = MagicMock(spec=httpx.Response)
+    mock_lookup_resp.status_code = 200
+    mock_lookup_resp.json.return_value = {
+        "Status": 1,
+        "result": {"path": "https://dld.srmist.edu.in/files/worksheet_1.docx"}
+    }
+
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_lookup_resp
+
+        file_url = await http_client.get_worksheet_file(
+            course_code="21CSC301J",
+            filename="worksheet_session_1.docx"
+        )
+        assert file_url == "https://dld.srmist.edu.in/files/worksheet_1.docx"
+
+    # 2. Download
+    mock_dl_resp = MagicMock(spec=httpx.Response)
+    mock_dl_resp.status_code = 200
+    mock_dl_resp.content = b"PK\x03\x04Mock DOCX Binary Content"
+
+    with patch.object(http_client, "_get_client", new_callable=AsyncMock) as mock_get_client:
+        mock_subclient = MagicMock(spec=httpx.AsyncClient)
+        mock_subclient.get = AsyncMock(return_value=mock_dl_resp)
+        mock_get_client.return_value = mock_subclient
+
+        out_path = await http_client.download_worksheet(
+            file_url_or_id=file_url,
+            destination_dir=tmp_path,
+            filename="worksheet_1.docx"
+        )
+        assert out_path.exists()
+        assert out_path.read_bytes() == b"PK\x03\x04Mock DOCX Binary Content"
+
+
+@pytest.mark.asyncio
+async def test_worksheet_file_lookup_not_found(http_client: SRMHttpClient):
+    """Verify WorksheetNotFound is raised when server returns Status == 0."""
+    http_client._jwt_token = "mock_jwt"
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 0,
+        "msg": "File not found on storage"
+    }
+
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        with pytest.raises(WorksheetNotFound):
+            await http_client.get_worksheet_file(
+                course_code="21CSC301J",
+                filename="nonexistent.docx"
+            )
+
+
+@pytest.mark.asyncio
+async def test_submission_and_verification(http_client: SRMHttpClient):
+    """Verify submit_worksheet_link issues UPDATE action and verify_submission confirms link."""
+    http_client._jwt_token = "mock_jwt"
+    http_client._user_id = "RA2111003010001"
+
+    # 1. Submission
+    mock_sub_resp = MagicMock(spec=httpx.Response)
+    mock_sub_resp.status_code = 200
+    mock_sub_resp.json.return_value = {
+        "Status": 1,
+        "msg": "Link Updated Successfully",
+        "link": "https://drive.google.com/file/d/submitted_link/view"
+    }
+
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_sub_resp
+
+        result = await http_client.submit_worksheet_link(
+            view_link="https://drive.google.com/file/d/submitted_link/view",
+            download_link="https://drive.google.com/file/d/submitted_link/view",
+            session=1,
+            slo=1,
+            course_code="21CSC301J",
+            course_name="Operating Systems",
+            batch_id="B1",
+        )
+        assert result.success is True
+        assert result.returned_link == "https://drive.google.com/file/d/submitted_link/view"
+
+    # 2. Verification
+    mock_status = SRMSessionStatus(
+        session=1,
+        practice_status={"11": 1},
+        slo_links={"11": "https://drive.google.com/file/d/submitted_link/view"},
+    )
+    with patch.object(http_client, "get_session_status", new_callable=AsyncMock) as mock_get_status:
+        mock_get_status.return_value = mock_status
+
+        verified = await http_client.verify_submission(
+            session_or_worksheet_id=1,
+            slo=1,
+            expected_link="https://drive.google.com/file/d/submitted_link/view",
+            course_info={"BATCH_ID": "B1"}
+        )
+        assert verified is True
+
+        # Verification with mismatching expected link should fail
+        with pytest.raises(VerificationFailed):
+            await http_client.verify_submission(
+                session_or_worksheet_id=1,
+                slo=1,
+                expected_link="https://drive.google.com/file/d/DIFFERENT_LINK",
+                course_info={"BATCH_ID": "B1"}
+            )
+
+
+@pytest.mark.asyncio
+async def test_retry_behavior_on_transient_error(http_client: SRMHttpClient):
+    """Verify HTTP client automatically retries transient 503 error before succeeding."""
+    http_client._client = MagicMock(spec=httpx.AsyncClient)
+    http_client._client.is_closed = False
+
+    resp_503 = MagicMock(spec=httpx.Response)
+    resp_503.status_code = 503
+
+    resp_200 = MagicMock(spec=httpx.Response)
+    resp_200.status_code = 200
+    resp_200.json.return_value = {"Status": 1}
+
+    http_client._client.request = AsyncMock(side_effect=[resp_503, resp_200])
+
+    response = await http_client._request_with_retry(
+        "POST", "https://dld.srmist.edu.in/ktretecurricula/server/curricula/checkstatus"
+    )
+    assert response.status_code == 200
+    assert http_client._client.request.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sensitive_data_redaction_in_logging(http_client: SRMHttpClient, caplog):
+    """Verify that credentials, passwords, and JWT tokens are NEVER output to loggers."""
+    caplog.set_level(logging.INFO)
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 1,
+        "token": "SECRET_JWT_TOKEN_NEVER_LOG",
+        "user": {"USER_ID": "RA12345", "FULL_NAME": "Confidential Student"}
+    }
+
+    with patch.object(http_client, "_get_client", new_callable=AsyncMock) as mock_get_client:
+        mock_subclient = MagicMock(spec=httpx.AsyncClient)
+        mock_subclient.request = AsyncMock(return_value=mock_resp)
+        mock_get_client.return_value = mock_subclient
+
+        await http_client.authenticate({
+            "username": "RA12345",
+            "password": "SUPER_SECRET_PASSWORD"
+        })
+
+        all_logs = " ".join(record.message for record in caplog.records)
+        assert "SUPER_SECRET_PASSWORD" not in all_logs
+        assert "SECRET_JWT_TOKEN_NEVER_LOG" not in all_logs

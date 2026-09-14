@@ -16,6 +16,11 @@ class SRMAuthenticationError(SRMException):
     pass
 
 
+class AuthenticationFailed(SRMAuthenticationError):
+    """Specific exception for invalid credentials or authentication failure."""
+    pass
+
+
 class SRMCaptchaRequired(SRMException):
     """Raised when SRM requires a CAPTCHA solve.
     
@@ -33,6 +38,29 @@ class SRMCaptchaRequired(SRMException):
         self.challenge_data = challenge_data or {}
 
 
+class CaptchaRequired(SRMCaptchaRequired):
+    """Alias for SRMCaptchaRequired."""
+    pass
+
+
+class InvalidSession(SRMException):
+    """Raised when an existing session is expired or token has been invalidated."""
+    pass
+
+
+class Unauthorized(SRMException):
+    """Raised when access to an SRM resource is unauthorized (HTTP 401/403)."""
+    pass
+
+
+class SRMApiError(SRMException):
+    """Raised when an SRM API returns Status == 0 or an application-level error."""
+    def __init__(self, message: str, status_code: Optional[int] = None, response_data: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_data = response_data or {}
+
+
 class SRMTransportUnavailableError(SRMException):
     """Raised when direct HTTP transport cannot fulfill an operation
     and fallback to browser automation is needed.
@@ -45,6 +73,26 @@ class SRMWorksheetNotFoundError(SRMException):
     pass
 
 
+class WorksheetNotFound(SRMWorksheetNotFoundError):
+    """Alias for SRMWorksheetNotFoundError."""
+    pass
+
+
+class DownloadFailed(SRMException):
+    """Raised when downloading a worksheet file fails."""
+    pass
+
+
 class SRMSubmissionError(SRMException):
     """Raised when worksheet upload or submission fails."""
+    pass
+
+
+class SubmissionFailed(SRMSubmissionError):
+    """Specific exception when worksheet link submission fails."""
+    pass
+
+
+class VerificationFailed(SRMException):
+    """Raised when verifying a submitted worksheet fails to confirm on the portal."""
     pass
