@@ -118,10 +118,11 @@ class SRMHttpClient(SRMClient):
         parsed_url = httpx.URL(url)
         safe_path = parsed_url.path
         
+        total_attempts = self.max_retries + 1
         attempt = 0
         backoff = 0.5
 
-        while attempt <= self.max_retries:
+        while attempt < total_attempts:
             attempt += 1
             start_time = time.time()
             try:
@@ -138,10 +139,10 @@ class SRMHttpClient(SRMClient):
                 )
 
                 # Check for transient server errors (502, 503, 504)
-                if response.status_code in (502, 503, 504) and attempt <= self.max_retries:
+                if response.status_code in (502, 503, 504) and attempt < total_attempts:
                     logger.warning(
                         "Transient server error %d on %s (attempt %d/%d). Retrying in %.2fs...",
-                        response.status_code, safe_path, attempt, self.max_retries, backoff
+                        response.status_code, safe_path, attempt, total_attempts, backoff
                     )
                     await asyncio.sleep(backoff)
                     backoff *= 2
@@ -163,9 +164,9 @@ class SRMHttpClient(SRMClient):
                 duration_ms = int((time.time() - start_time) * 1000)
                 logger.warning(
                     "HTTP %s %s failed with network error: %s (%d ms). Attempt %d/%d",
-                    method, safe_path, exc, duration_ms, attempt, self.max_retries
+                    method, safe_path, exc, duration_ms, attempt, total_attempts
                 )
-                if attempt > self.max_retries:
+                if attempt >= total_attempts:
                     raise SRMConnectionError(f"Network error accessing {safe_path}: {exc}") from exc
                 await asyncio.sleep(backoff)
                 backoff *= 2
@@ -369,37 +370,98 @@ class SRMHttpClient(SRMClient):
     async def get_worksheet_file(
         self,
         course_code: str,
-        filename: str,
+        session: Union[int, str] = 1,
+        slo: int = 1,
+        format_type: str = "docx",
+        filename: Optional[str] = None,
         path: Optional[str] = None,
         server: Optional[str] = None,
     ) -> str:
-        """Lookup worksheet file download URL via POST /curricula/admin/file/getfile."""
-        target_path = path or f"data/coordinator/{course_code}/syllabus"
-        target_server = server or self.questions_server_url
+        """Lookup worksheet file download URL via POST /curricula/admin/file/getfile.
+        
+        Derives the real SRM filename schema ({session}{slo}.{ext}) and file storage path
+        (data/coordinator/{course_code}/slp for docx, slppdf for pdf).
+        Calls the questions server endpoint where files reside, with fallback to direct
+        static URL verification.
+        """
+        # Backward compatibility: if session is passed as a string filename (e.g. "worksheet_1.docx")
+        if isinstance(session, str):
+            if "." in session or not session.isdigit():
+                filename = session
+                session = 1
+            else:
+                session = int(session)
 
-        url = f"{self.api_base_url}/curricula/admin/file/getfile"
+        # 1. Derive filename according to real SRM schema
+        fmt = format_type.lower().lstrip(".")
+        if filename:
+            target_filename = filename
+            if target_filename.endswith(".pdf"):
+                fmt = "pdf"
+        else:
+            target_filename = f"{int(session)}{slo}.{fmt}"
+
+        # 2. Derive storage path according to real SRM schema
+        if path:
+            target_path = path
+        else:
+            folder = "slppdf" if fmt == "pdf" else "slp"
+            target_path = f"data/coordinator/{course_code}/{folder}"
+
+        target_server = server or self.questions_server_url
+        headers = self._get_auth_headers()
         payload = {
             "path": target_path,
-            "filename": filename,
+            "filename": target_filename,
             "server": target_server,
             "key": self.key,
         }
-        headers = self._get_auth_headers()
 
-        resp = await self._request_with_retry("POST", url, json_data=payload, headers=headers)
-        data = resp.json()
+        # 3. Target the questions server file endpoint first (fast, handles file lookups)
+        endpoint_url = f"{self.questions_server_url}/curricula/admin/file/getfile"
+        data: Dict[str, Any] = {}
+        try:
+            resp = await self._request_with_retry("POST", endpoint_url, json_data=payload, headers=headers)
+            data = resp.json()
+        except (SRMConnectionError, SRMApiError) as primary_err:
+            logger.warning(
+                "Questions server getfile failed (%s); trying fallback api_base_url...",
+                primary_err
+            )
+            fallback_url = f"{self.api_base_url}/curricula/admin/file/getfile"
+            try:
+                resp = await self._request_with_retry("POST", fallback_url, json_data=payload, headers=headers)
+                data = resp.json()
+            except Exception as fallback_err:
+                logger.warning("Fallback getfile endpoint also failed: %s", fallback_err)
+                data = {"Status": 0, "msg": str(fallback_err)}
 
-        if data.get("Status") != 1:
-            msg = data.get("msg") or f"Worksheet file '{filename}' not found"
-            raise WorksheetNotFound(f"File lookup failed: {msg}")
+        # 4. Check if endpoint returned success path
+        if data.get("Status") == 1:
+            result = data.get("result", {})
+            file_path = result.get("path") or data.get("path")
+            if file_path:
+                logger.info("Resolved worksheet file %s path successfully: %s", target_filename, file_path)
+                return file_path
 
-        result = data.get("result", {})
-        file_path = result.get("path")
-        if not file_path:
-            raise WorksheetNotFound(f"Result returned without file path for '{filename}'")
+        # 5. Alternative resolution: Direct static file URL on the uploads server
+        direct_static_url = f"{self.questions_server_url}/uploads/{target_path}/{target_filename}"
+        try:
+            client = await self._get_client()
+            static_resp = await client.head(direct_static_url, timeout=5.0)
+            if static_resp.status_code == 200:
+                logger.info(
+                    "Resolved worksheet file %s via direct static uploads URL: %s",
+                    target_filename, direct_static_url
+                )
+                return direct_static_url
+        except Exception as static_err:
+            logger.debug("Direct static URL probe failed for %s: %s", direct_static_url, static_err)
 
-        logger.info("Resolved worksheet file %s path successfully", filename)
-        return file_path
+        msg = data.get("msg") or "File not found on storage"
+        raise WorksheetNotFound(
+            f"Worksheet file '{target_filename}' lookup failed: {msg} (path: {target_path})"
+        )
 
     async def download_worksheet(
         self,

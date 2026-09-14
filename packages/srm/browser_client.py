@@ -2,7 +2,7 @@ import logging
 import base64
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
 
 from packages.srm.client import SRMClient
@@ -231,7 +231,10 @@ class SRMBrowserClient(SRMClient):
     async def get_worksheet_file(
         self,
         course_code: str,
-        filename: str,
+        session: Union[int, str] = 1,
+        slo: int = 1,
+        format_type: str = "docx",
+        filename: Optional[str] = None,
         path: Optional[str] = None,
         server: Optional[str] = None,
     ) -> str:

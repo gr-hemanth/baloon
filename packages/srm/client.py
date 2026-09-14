@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from packages.srm.models import (
     SRMCourse,
     SRMSemester,
@@ -78,7 +78,10 @@ class SRMClient(ABC):
     async def get_worksheet_file(
         self,
         course_code: str,
-        filename: str,
+        session: Union[int, str] = 1,
+        slo: int = 1,
+        format_type: str = "docx",
+        filename: Optional[str] = None,
         path: Optional[str] = None,
         server: Optional[str] = None,
     ) -> str:

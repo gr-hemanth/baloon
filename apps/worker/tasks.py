@@ -112,13 +112,15 @@ async def _run_job_workflow(job_id: str, credentials: Optional[Dict[str, Any]] =
 
             # Job-specific temporary working directory (outside source tree)
             job_temp_dir = Path(tempfile.mkdtemp(prefix=f"srm_job_{job.id[:8]}_"))
-            worksheet_filename = f"worksheet_{course_code}_session_{session_num}.docx"
+            worksheet_filename = f"{session_num}1.docx"
 
-            # Resolve worksheet file URL
+            # Resolve worksheet file URL using SRM document schema
             try:
                 file_url = await orchestrator.get_worksheet_file(
                     course_code=course_code,
-                    filename=worksheet_filename
+                    session=session_num,
+                    slo=1,
+                    format_type="docx",
                 )
                 downloaded_file = await orchestrator.download_worksheet(
                     file_url_or_id=file_url,

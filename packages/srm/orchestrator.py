@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 
 from packages.srm.client import SRMClient
 from packages.srm.http_client import SRMHttpClient
@@ -153,17 +153,26 @@ class SRMOrchestrator(SRMClient):
     async def get_worksheet_file(
         self,
         course_code: str,
-        filename: str,
+        session: Union[int, str] = 1,
+        slo: int = 1,
+        format_type: str = "docx",
+        filename: Optional[str] = None,
         path: Optional[str] = None,
         server: Optional[str] = None,
     ) -> str:
         """Direct HTTP worksheet file path lookup."""
         if self.mode == "browser":
-            return await self.browser_client.get_worksheet_file(course_code, filename, path, server)
+            return await self.browser_client.get_worksheet_file(
+                course_code, session, slo, format_type, filename, path, server
+            )
         try:
-            return await self.http_client.get_worksheet_file(course_code, filename, path, server)
+            return await self.http_client.get_worksheet_file(
+                course_code, session, slo, format_type, filename, path, server
+            )
         except SRMTransportUnavailableError:
-            return await self.browser_client.get_worksheet_file(course_code, filename, path, server)
+            return await self.browser_client.get_worksheet_file(
+                course_code, session, slo, format_type, filename, path, server
+            )
 
     async def download_worksheet(
         self,

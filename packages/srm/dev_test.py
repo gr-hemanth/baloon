@@ -93,31 +93,65 @@ async def run_safe_dev_test():
     # Step 4: Inspect First Course Session & Status
     if courses:
         target = courses[0]
-        print(f"\n[4/5] Retrieving session status for {target.course_code} (Session 1)...")
+        print(f"\n[4/5] Inspecting session details for {target.course_code} (Session 1)...")
         try:
             status = await client.get_session_status(
                 course_info={"BATCH_ID": target.batch_id, "COURSE_CODE": target.course_code},
                 session=1
             )
-            print(f"  -> Practice Status: {status.practice_status}")
+            print(f"  -> Session Status Practice map: {status.practice_status}")
             print(f"  -> Submitted Links count: {len(status.slo_links)}")
         except Exception as exc:
             print(f"  -> Session status check error: {exc}")
 
-    # Step 5: Test File Lookup & Download
+        try:
+            questions = await client.get_questions(
+                course_code=target.course_code,
+                batch_id=target.batch_id,
+                session=1,
+            )
+            print(f"  -> Session 1 Content: {len(questions.mcq)} MCQs, {len(questions.sq)} Short Qs, {len(questions.lq)} Long Qs")
+        except Exception as exc:
+            print(f"  -> Question retrieval notice: {exc}")
+
+    # Step 5: Test Real SRM Worksheet Resolution & Download
     if courses:
         target = courses[0]
-        print(f"\n[5/5] Testing worksheet file resolution for {target.course_code}...")
+        print(f"\n[5/5] Testing real SRM worksheet resolution for {target.course_code} (Session 1, SLO 1)...")
+        
+        # Test 5A: DOCX Resolution (schema: data/coordinator/{course}/slp/{session}{slo}.docx)
+        print("  -> Testing DOCX resolution (11.docx)...")
         try:
-            file_url = await client.get_worksheet_file(
+            file_url_docx = await client.get_worksheet_file(
                 course_code=target.course_code,
-                filename="worksheet_session_1.docx"
+                session=1,
+                slo=1,
+                format_type="docx"
             )
-            print(f"  -> Resolved file URL: {file_url}")
-            dl_path = await client.download_worksheet(file_url)
-            print(f"  -> Downloaded file to temporary directory: {dl_path}")
+            print(f"     Resolved DOCX URL: {file_url_docx}")
+            dl_path = await client.download_worksheet(file_url_docx)
+            print(f"     Downloaded DOCX to: {dl_path}")
+        except WorksheetNotFound as wnf:
+            print(f"     DOCX not found on portal: {wnf}")
         except Exception as exc:
-            print(f"  -> Worksheet file resolution notice (file may not exist for this course/session yet): {exc}")
+            print(f"     DOCX resolution encountered error: {exc}")
+
+        # Test 5B: PDF Resolution (schema: data/coordinator/{course}/slppdf/{session}{slo}.pdf)
+        print("  -> Testing PDF resolution (11.pdf)...")
+        try:
+            file_url_pdf = await client.get_worksheet_file(
+                course_code=target.course_code,
+                session=1,
+                slo=1,
+                format_type="pdf"
+            )
+            print(f"     Resolved PDF URL: {file_url_pdf}")
+            dl_path = await client.download_worksheet(file_url_pdf)
+            print(f"     Downloaded PDF to: {dl_path}")
+        except WorksheetNotFound as wnf:
+            print(f"     PDF not found on portal: {wnf}")
+        except Exception as exc:
+            print(f"     PDF resolution encountered error: {exc}")
 
     await client.close()
     print("\n" + "=" * 60)

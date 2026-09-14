@@ -16,6 +16,7 @@ from packages.srm.exceptions import (
     VerificationFailed,
     Unauthorized,
     InvalidSession,
+    SRMConnectionError,
 )
 
 
@@ -217,8 +218,89 @@ async def test_worksheet_file_lookup_and_download(http_client: SRMHttpClient, tm
 
 
 @pytest.mark.asyncio
+async def test_worksheet_file_lookup_schema_derived(http_client: SRMHttpClient):
+    """Verify get_worksheet_file derives real SRM schema (11.docx / 11.pdf) and paths."""
+    http_client._jwt_token = "mock_jwt"
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 1,
+        "result": {"path": "https://dld.srmist.edu.in/files/11.docx"}
+    }
+
+    # Test DOCX derivation
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        file_url = await http_client.get_worksheet_file(
+            course_code="21CSC301J",
+            session=1,
+            slo=1,
+            format_type="docx"
+        )
+        assert file_url == "https://dld.srmist.edu.in/files/11.docx"
+        call_args = mock_req.call_args
+        assert call_args[0][0] == "POST"
+        assert "getfile" in call_args[0][1]
+        assert call_args[1]["json_data"]["filename"] == "11.docx"
+        assert call_args[1]["json_data"]["path"] == "data/coordinator/21CSC301J/slp"
+
+    # Test PDF derivation
+    mock_resp.json.return_value = {
+        "Status": 1,
+        "result": {"path": "https://dld.srmist.edu.in/files/11.pdf"}
+    }
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        file_url = await http_client.get_worksheet_file(
+            course_code="21CSC301J",
+            session=1,
+            slo=1,
+            format_type="pdf"
+        )
+        assert file_url == "https://dld.srmist.edu.in/files/11.pdf"
+        call_args = mock_req.call_args
+        assert call_args[1]["json_data"]["filename"] == "11.pdf"
+        assert call_args[1]["json_data"]["path"] == "data/coordinator/21CSC301J/slppdf"
+
+
+@pytest.mark.asyncio
+async def test_worksheet_file_lookup_direct_static_fallback(http_client: SRMHttpClient):
+    """Verify fallback to direct static uploads URL when getfile returns Status 0."""
+    http_client._jwt_token = "mock_jwt"
+
+    mock_getfile_resp = MagicMock(spec=httpx.Response)
+    mock_getfile_resp.status_code = 200
+    mock_getfile_resp.json.return_value = {
+        "Status": 0,
+        "msg": "File not found!!!"
+    }
+
+    mock_head_resp = MagicMock(spec=httpx.Response)
+    mock_head_resp.status_code = 200
+
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req, \
+         patch.object(http_client, "_get_client", new_callable=AsyncMock) as mock_get_client:
+        mock_req.return_value = mock_getfile_resp
+        mock_subclient = MagicMock(spec=httpx.AsyncClient)
+        mock_subclient.head = AsyncMock(return_value=mock_head_resp)
+        mock_get_client.return_value = mock_subclient
+
+        file_url = await http_client.get_worksheet_file(
+            course_code="21CSC301J",
+            session=1,
+            slo=1,
+            format_type="docx"
+        )
+        expected_url = f"{http_client.questions_server_url}/uploads/data/coordinator/21CSC301J/slp/11.docx"
+        assert file_url == expected_url
+
+
+@pytest.mark.asyncio
 async def test_worksheet_file_lookup_not_found(http_client: SRMHttpClient):
-    """Verify WorksheetNotFound is raised when server returns Status == 0."""
+    """Verify WorksheetNotFound is raised when both getfile and static probe fail."""
     http_client._jwt_token = "mock_jwt"
 
     mock_resp = MagicMock(spec=httpx.Response)
@@ -228,14 +310,22 @@ async def test_worksheet_file_lookup_not_found(http_client: SRMHttpClient):
         "msg": "File not found on storage"
     }
 
-    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req:
-        mock_req.return_value = mock_resp
+    mock_head_resp = MagicMock(spec=httpx.Response)
+    mock_head_resp.status_code = 404
 
-        with pytest.raises(WorksheetNotFound):
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req, \
+         patch.object(http_client, "_get_client", new_callable=AsyncMock) as mock_get_client:
+        mock_req.return_value = mock_resp
+        mock_subclient = MagicMock(spec=httpx.AsyncClient)
+        mock_subclient.head = AsyncMock(return_value=mock_head_resp)
+        mock_get_client.return_value = mock_subclient
+
+        with pytest.raises(WorksheetNotFound) as exc_info:
             await http_client.get_worksheet_file(
                 course_code="21CSC301J",
                 filename="nonexistent.docx"
             )
+        assert "nonexistent.docx" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -343,3 +433,28 @@ async def test_sensitive_data_redaction_in_logging(http_client: SRMHttpClient, c
         all_logs = " ".join(record.message for record in caplog.records)
         assert "SUPER_SECRET_PASSWORD" not in all_logs
         assert "SECRET_JWT_TOKEN_NEVER_LOG" not in all_logs
+
+
+@pytest.mark.asyncio
+async def test_retry_logging_format(http_client: SRMHttpClient, caplog):
+    """Verify retry logging formats attempts cleanly as Attempt X/total and never logs Attempt 4/3."""
+    caplog.set_level(logging.WARNING)
+    http_client.max_retries = 3
+
+    http_client._client = MagicMock(spec=httpx.AsyncClient)
+    http_client._client.is_closed = False
+
+    # Force all 4 attempts (1 initial + 3 retries) to fail with connection timeout
+    http_client._client.request = AsyncMock(side_effect=httpx.ConnectTimeout("Connection timed out"))
+
+    with pytest.raises(SRMConnectionError):
+        await http_client._request_with_retry("POST", "https://dld.srmist.edu.in/curricula/test")
+
+    log_messages = [record.message for record in caplog.records]
+    # Check that it logged Attempt 1/4, 2/4, 3/4, 4/4
+    assert any("Attempt 1/4" in msg for msg in log_messages)
+    assert any("Attempt 2/4" in msg for msg in log_messages)
+    assert any("Attempt 3/4" in msg for msg in log_messages)
+    assert any("Attempt 4/4" in msg for msg in log_messages)
+    # Check that it NEVER logged "Attempt 4/3"
+    assert not any("Attempt 4/3" in msg for msg in log_messages)
