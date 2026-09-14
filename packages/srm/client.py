@@ -10,6 +10,8 @@ from packages.srm.models import (
     SRMQuestionSet,
     SRMSessionStatus,
     SRMSubmissionResult,
+    SRMWorksheetMetadata,
+    SRMCourseStatus,
 )
 
 
@@ -86,6 +88,18 @@ class SRMClient(ABC):
         server: Optional[str] = None,
     ) -> str:
         """Resolve worksheet file storage path to download URL."""
+        pass
+
+    @abstractmethod
+    async def discover_worksheets(
+        self,
+        course_code: str,
+        batch_id: Optional[str] = None,
+        session: Optional[int] = None,
+        format_type: Optional[str] = None,
+        resolve_urls: bool = True,
+    ) -> List[SRMWorksheetMetadata]:
+        """Discover available worksheets for a course based on portal course status and session metadata."""
         pass
 
     @abstractmethod

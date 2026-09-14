@@ -7,7 +7,14 @@ import httpx
 import pytest
 
 from packages.srm.http_client import SRMHttpClient
-from packages.srm.models import SRMCourse, SRMQuestionSet, SRMSessionStatus, SRMSubmissionResult
+from packages.srm.models import (
+    SRMCourse,
+    SRMQuestionSet,
+    SRMSessionStatus,
+    SRMSubmissionResult,
+    SRMWorksheetMetadata,
+    SRMCourseStatus,
+)
 from packages.srm.exceptions import (
     AuthenticationFailed,
     WorksheetNotFound,
@@ -326,6 +333,145 @@ async def test_worksheet_file_lookup_not_found(http_client: SRMHttpClient):
                 filename="nonexistent.docx"
             )
         assert "nonexistent.docx" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_get_course_status(http_client: SRMHttpClient):
+    """Verify get_course_status parses course sessionCount, slp, and slppdf registers."""
+    http_client._jwt_token = "mock_jwt"
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 1,
+        "result": {
+            "sessionCount": [
+                {"_id": 1, "UNITNAME": "Unit 1 Intro", "SESSIONCOUNT": 12},
+                {"_id": 2, "UNITNAME": "Unit 2 Adv", "SESSIONCOUNT": 10},
+            ],
+            "slp": [1011, 1012, 1021],
+            "slppdf": [1011, 1012],
+            "slpPractice": [1011, 1012],
+            "assessment": [],
+        }
+    }
+
+    with patch.object(http_client, "_request_with_retry", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_resp
+
+        status = await http_client.get_course_status("21CSC303J")
+        assert status.course_code == "21CSC303J"
+        assert len(status.session_count) == 2
+        assert status.available_slp == [1011, 1012, 1021]
+        assert status.available_slppdf == [1011, 1012]
+        assert status.available_practice == [1011, 1012]
+
+
+@pytest.mark.asyncio
+async def test_discover_worksheets_full_course(http_client: SRMHttpClient):
+    """Verify discover_worksheets returns complete structured metadata across course units."""
+    http_client._jwt_token = "mock_jwt"
+
+    mock_course_status = SRMCourseStatus(
+        course_code="21CSC303J",
+        session_count=[
+            {"_id": 1, "UNITNAME": "Introduction", "SESSIONCOUNT": 2},
+        ],
+        available_slp=[1011, 1012],
+        available_slppdf=[1011],
+        available_practice=[1011],
+    )
+
+    with patch.object(http_client, "get_course_status", new_callable=AsyncMock) as mock_status:
+        mock_status.return_value = mock_course_status
+
+        worksheets = await http_client.discover_worksheets("21CSC303J")
+        # 1 unit * 2 sessions * 2 SLOs * 2 formats (docx + pdf) = 8 entries
+        assert len(worksheets) == 8
+
+        # Check DOCX available
+        ws_1011_docx = next(w for w in worksheets if w.filename == "1011.docx")
+        assert ws_1011_docx.is_available is True
+        assert ws_1011_docx.course_code == "21CSC303J"
+        assert ws_1011_docx.session == 101
+        assert ws_1011_docx.slo == 1
+        assert ws_1011_docx.unit == 1
+        assert ws_1011_docx.session_no == 1
+        assert ws_1011_docx.format == "docx"
+        assert ws_1011_docx.storage_path == "data/coordinator/21CSC303J/slp"
+        assert "uploads/data/coordinator/21CSC303J/slp/1011.docx" in ws_1011_docx.download_url
+
+        # Check PDF available
+        ws_1011_pdf = next(w for w in worksheets if w.filename == "1011.pdf")
+        assert ws_1011_pdf.is_available is True
+        assert ws_1011_pdf.format == "pdf"
+        assert ws_1011_pdf.storage_path == "data/coordinator/21CSC303J/slppdf"
+
+        # Check PDF not available (1012.pdf not in available_slppdf)
+        ws_1012_pdf = next(w for w in worksheets if w.filename == "1012.pdf")
+        assert ws_1012_pdf.is_available is False
+        assert ws_1012_pdf.download_url is None
+
+
+@pytest.mark.asyncio
+async def test_discover_worksheets_filtered(http_client: SRMHttpClient):
+    """Verify discover_worksheets supports filtering by session and format."""
+    http_client._jwt_token = "mock_jwt"
+
+    mock_course_status = SRMCourseStatus(
+        course_code="21CSC303J",
+        available_slp=[1011],
+        available_slppdf=[],
+    )
+
+    with patch.object(http_client, "get_course_status", new_callable=AsyncMock) as mock_status:
+        mock_status.return_value = mock_course_status
+
+        worksheets = await http_client.discover_worksheets(
+            course_code="21CSC303J",
+            session=101,
+            format_type="docx",
+        )
+        # Session 101 * 2 SLOs * 1 format = 2 entries
+        assert len(worksheets) == 2
+        assert all(w.format == "docx" for w in worksheets)
+        assert [w.filename for w in worksheets] == ["1011.docx", "1012.docx"]
+        assert worksheets[0].is_available is True
+        assert worksheets[1].is_available is False
+
+
+@pytest.mark.asyncio
+async def test_discover_worksheets_with_practice_status(http_client: SRMHttpClient):
+    """Verify discover_worksheets incorporates practice submission state."""
+    http_client._jwt_token = "mock_jwt"
+
+    mock_course_status = SRMCourseStatus(
+        course_code="21CSC303J",
+        available_slp=[1011],
+    )
+    mock_session_status = SRMSessionStatus(
+        session=101,
+        practice_status={"1011": 2, "1012": 1},
+        slo_links={"1011": {"view": "https://drive.google.com/test_verified"}},
+    )
+
+    with patch.object(http_client, "get_course_status", new_callable=AsyncMock) as mock_cs, \
+         patch.object(http_client, "get_session_status", new_callable=AsyncMock) as mock_ss:
+        mock_cs.return_value = mock_course_status
+        mock_ss.return_value = mock_session_status
+
+        worksheets = await http_client.discover_worksheets(
+            course_code="21CSC303J",
+            batch_id="BATCH_123",
+            session=101,
+            format_type="docx",
+        )
+        ws_1011 = next(w for w in worksheets if w.filename == "1011.docx")
+        assert ws_1011.submission_status == "VERIFIED"
+        assert ws_1011.submitted_link == "https://drive.google.com/test_verified"
+
+        ws_1012 = next(w for w in worksheets if w.filename == "1012.docx")
+        assert ws_1012.submission_status == "PENDING"
 
 
 @pytest.mark.asyncio

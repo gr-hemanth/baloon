@@ -14,6 +14,7 @@ from packages.srm.models import (
     SRMWorksheetFile,
     SRMWorksheet,
     SRMSubmissionReceipt,
+    SRMWorksheetMetadata,
 )
 from packages.srm.exceptions import (
     SRMConnectionError,
@@ -239,6 +240,16 @@ class SRMBrowserClient(SRMClient):
         server: Optional[str] = None,
     ) -> str:
         raise WorksheetNotFound("Worksheet file lookup via browser not supported")
+
+    async def discover_worksheets(
+        self,
+        course_code: str,
+        batch_id: Optional[str] = None,
+        session: Optional[int] = None,
+        format_type: Optional[str] = None,
+        resolve_urls: bool = True,
+    ) -> List[SRMWorksheetMetadata]:
+        return []
 
     async def download_worksheet(
         self,

@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 from packages.srm.http_client import SRMHttpClient
-from packages.srm.exceptions import AuthenticationFailed, SRMApiError, SRMException
+from packages.srm.exceptions import AuthenticationFailed, SRMApiError, SRMException, WorksheetNotFound
 
 
 async def run_safe_dev_test():
@@ -114,44 +114,86 @@ async def run_safe_dev_test():
         except Exception as exc:
             print(f"  -> Question retrieval notice: {exc}")
 
-    # Step 5: Test Real SRM Worksheet Resolution & Download
-    if courses:
-        target = courses[0]
-        print(f"\n[5/5] Testing real SRM worksheet resolution for {target.course_code} (Session 1, SLO 1)...")
-        
-        # Test 5A: DOCX Resolution (schema: data/coordinator/{course}/slp/{session}{slo}.docx)
-        print("  -> Testing DOCX resolution (11.docx)...")
-        try:
-            file_url_docx = await client.get_worksheet_file(
-                course_code=target.course_code,
-                session=1,
-                slo=1,
-                format_type="docx"
-            )
-            print(f"     Resolved DOCX URL: {file_url_docx}")
-            dl_path = await client.download_worksheet(file_url_docx)
-            print(f"     Downloaded DOCX to: {dl_path}")
-        except WorksheetNotFound as wnf:
-            print(f"     DOCX not found on portal: {wnf}")
-        except Exception as exc:
-            print(f"     DOCX resolution encountered error: {exc}")
+    # Step 5: Data-Driven Worksheet Discovery & Download
+    target_course = None
+    if sem3_courses:
+        target_course = sem3_courses[0]
+    elif courses:
+        target_course = courses[0]
 
-        # Test 5B: PDF Resolution (schema: data/coordinator/{course}/slppdf/{session}{slo}.pdf)
-        print("  -> Testing PDF resolution (11.pdf)...")
-        try:
-            file_url_pdf = await client.get_worksheet_file(
-                course_code=target.course_code,
-                session=1,
-                slo=1,
-                format_type="pdf"
-            )
-            print(f"     Resolved PDF URL: {file_url_pdf}")
-            dl_path = await client.download_worksheet(file_url_pdf)
-            print(f"     Downloaded PDF to: {dl_path}")
-        except WorksheetNotFound as wnf:
-            print(f"     PDF not found on portal: {wnf}")
-        except Exception as exc:
-            print(f"     PDF resolution encountered error: {exc}")
+    if target_course:
+        print(f"\n[5/5] Performing data-driven worksheet discovery...")
+        
+        # Test discovery across Semester 3 courses to find real available worksheets
+        courses_to_probe = sem3_courses if sem3_courses else courses[:3]
+        downloaded_ws_info = None
+
+        for c in courses_to_probe:
+            print(f"\n  --- Course: {c.course_code} ({c.course_name}) ---")
+            try:
+                discovered = await client.discover_worksheets(
+                    course_code=c.course_code,
+                    batch_id=c.batch_id,
+                )
+                available = [w for w in discovered if w.is_available]
+                print(f"  -> Discovered {len(discovered)} total worksheet slots across units.")
+                print(f"  -> Uploaded/Available on portal: {len(available)} worksheets.")
+
+                if available:
+                    # Print first 5 discovered available worksheets
+                    print("  -> Sample Available Worksheets:")
+                    for idx, w in enumerate(available[:5], 1):
+                        print(f"     {idx}. Unit {w.unit} Session {w.session_no} (ID: {w.session}) SLO {w.slo}: {w.filename} [{w.format.upper()}]")
+                        print(f"        Path: {w.storage_path}")
+                        print(f"        URL: {w.download_url}")
+
+                    # Download the first actually available worksheet
+                    if not downloaded_ws_info:
+                        target_ws = available[0]
+                        print(f"\n  -> Downloading verified available worksheet: {target_ws.filename}...")
+                        dl_path = await client.download_worksheet(
+                            file_url_or_id=target_ws.download_url,
+                            filename=target_ws.filename
+                        )
+                        downloaded_ws_info = {
+                            "course": target_ws.course_code,
+                            "session": target_ws.session,
+                            "slo": target_ws.slo,
+                            "format": target_ws.format,
+                            "filename": target_ws.filename,
+                            "local_path": str(dl_path),
+                            "size_bytes": dl_path.stat().st_size,
+                        }
+                        print(f"  -> Download SUCCESSFUL!")
+                        print(f"     Course: {downloaded_ws_info['course']}")
+                        print(f"     Session: {downloaded_ws_info['session']}")
+                        print(f"     SLO: {downloaded_ws_info['slo']}")
+                        print(f"     Format: {downloaded_ws_info['format'].upper()}")
+                        print(f"     Filename: {downloaded_ws_info['filename']}")
+                        print(f"     Local Temp Path: {downloaded_ws_info['local_path']}")
+                        print(f"     File Size: {downloaded_ws_info['size_bytes']} bytes")
+                else:
+                    print(f"  -> Notice: Coordinator has not uploaded worksheets for {c.course_code} yet.")
+            except Exception as disc_err:
+                print(f"  -> Discovery notice for {c.course_code}: {disc_err}")
+
+        # If none of the enrolled courses had files uploaded yet, test direct resolution probe
+        if not downloaded_ws_info:
+            print("\n  [Fallback Probe] Testing direct worksheet resolution on target course...")
+            try:
+                file_url = await client.get_worksheet_file(
+                    course_code=target_course.course_code,
+                    session=1,
+                    slo=1,
+                    format_type="docx"
+                )
+                print(f"  -> Resolved URL: {file_url}")
+                dl_path = await client.download_worksheet(file_url)
+                print(f"  -> Downloaded to: {dl_path}")
+            except WorksheetNotFound as wnf:
+                print(f"  -> Clean resolution result: {wnf}")
+            except Exception as exc:
+                print(f"  -> Probe notice: {exc}")
 
     await client.close()
     print("\n" + "=" * 60)

@@ -13,6 +13,8 @@ from packages.srm.models import (
     SRMSessionStatus,
     SRMSubmissionResult,
     SRMWorksheetFile,
+    SRMWorksheetMetadata,
+    SRMCourseStatus,
 )
 from packages.srm.exceptions import (
     SRMConnectionError,
@@ -367,6 +369,154 @@ class SRMHttpClient(SRMClient):
             raw_result=result,
         )
 
+    async def get_course_status(self, course_code: str) -> SRMCourseStatus:
+        """Query course learning status and worksheet availability.
+        
+        Invokes POST /curricula/admin/coursereport/getcoursestatus,
+        which returns course sessionCount, slp (DOCX list), slppdf (PDF list),
+        slpPractice, and assessment sessions without DOM automation.
+        """
+        url = f"{self.api_base_url}/curricula/admin/coursereport/getcoursestatus"
+        payload = {
+            "COURSE_CODE": course_code,
+            "key": self.key,
+        }
+        headers = self._get_auth_headers()
+        try:
+            resp = await self._request_with_retry("POST", url, json_data=payload, headers=headers)
+            data = resp.json()
+            if data.get("Status") == 1:
+                result = data.get("result", {})
+                return SRMCourseStatus(
+                    course_code=course_code,
+                    session_count=result.get("sessionCount", []),
+                    available_slp=result.get("slp", []),
+                    available_slppdf=result.get("slppdf", []),
+                    available_practice=result.get("slpPractice", []),
+                    assessments=result.get("assessment", []),
+                    raw_result=result,
+                )
+        except Exception as exc:
+            logger.warning("getcoursestatus query failed for %s: %s", course_code, exc)
+
+        return SRMCourseStatus(course_code=course_code)
+
+    async def discover_worksheets(
+        self,
+        course_code: str,
+        batch_id: Optional[str] = None,
+        session: Optional[int] = None,
+        format_type: Optional[str] = None,
+        resolve_urls: bool = True,
+    ) -> List[SRMWorksheetMetadata]:
+        """Discover available worksheets for a course based on portal status and session metadata.
+        
+        Data-driven discovery:
+        1. Retrieves course sessionCount and slp / slppdf uploaded file registers from getcoursestatus.
+        2. Inspects student practice status if active session / batch_id is present.
+        3. Identifies all sessions and SLOs (SLO 1 & SLO 2) using standard SRM numbering (100*U + S).
+        4. Compiles structured SRMWorksheetMetadata with format, filename, storage path, availability,
+           and static / resolved download URLs.
+        """
+        course_status = await self.get_course_status(course_code)
+
+        # Optional session status inspection if batch_id and session provided
+        practice_status_map: Dict[str, Any] = {}
+        slo_links_map: Dict[str, Any] = {}
+        if batch_id and session is not None:
+            try:
+                s_status = await self.get_session_status(
+                    course_info={"BATCH_ID": batch_id, "COURSE_CODE": course_code},
+                    session=session,
+                )
+                practice_status_map = s_status.practice_status
+                slo_links_map = s_status.slo_links
+            except Exception as exc:
+                logger.debug("Session status probe in discover_worksheets failed: %s", exc)
+
+        # Determine target sessions
+        target_sessions: List[int] = []
+        if session is not None:
+            target_sessions = [session]
+        elif course_status.session_count:
+            for u in course_status.session_count:
+                unit_no = int(u.get("_id", 1))
+                sess_count = int(u.get("SESSIONCOUNT", 0))
+                for s_num in range(1, sess_count + 1):
+                    target_sessions.append(100 * unit_no + s_num)
+        else:
+            # Default probing set: Unit 1 sessions 101-105 and 1-5
+            target_sessions = [101, 102, 103, 104, 105, 1, 2, 3, 4, 5]
+
+        # Determine formats
+        formats = ["docx", "pdf"]
+        if format_type:
+            formats = [format_type.lower().lstrip(".")]
+
+        discovered: List[SRMWorksheetMetadata] = []
+
+        for s_id in target_sessions:
+            unit_no = int(s_id // 100) if s_id >= 100 else 1
+            session_no = int(s_id % 100) if s_id >= 100 else s_id
+
+            for slo_no in (1, 2):
+                file_id = int(f"{s_id}{slo_no}")
+                # Status string from practiceStatus
+                raw_stat = practice_status_map.get(str(file_id)) or practice_status_map.get(f"{session_no}{slo_no}")
+                if raw_stat == 2:
+                    sub_status = "VERIFIED"
+                elif raw_stat == 1:
+                    sub_status = "PENDING"
+                elif raw_stat == -1:
+                    sub_status = "RESUBMISSION"
+                else:
+                    sub_status = "NOT_SUBMITTED"
+
+                submitted_link = slo_links_map.get(str(file_id)) or slo_links_map.get(f"{session_no}{slo_no}")
+                if isinstance(submitted_link, dict):
+                    submitted_link = submitted_link.get("view") or submitted_link.get("download")
+
+                for fmt in formats:
+                    folder = "slppdf" if fmt == "pdf" else "slp"
+                    filename = f"{file_id}.{fmt}"
+                    storage_path = f"data/coordinator/{course_code}/{folder}"
+
+                    # Availability check against uploaded file registers
+                    if fmt == "docx" and course_status.available_slp:
+                        is_avail = file_id in course_status.available_slp
+                    elif fmt == "pdf" and course_status.available_slppdf:
+                        is_avail = file_id in course_status.available_slppdf
+                    else:
+                        is_avail = False
+
+                    download_url = None
+                    if is_avail and resolve_urls:
+                        download_url = f"{self.questions_server_url}/uploads/{storage_path}/{filename}"
+
+                    discovered.append(
+                        SRMWorksheetMetadata(
+                            course_code=course_code,
+                            session=s_id,
+                            slo=slo_no,
+                            unit=unit_no,
+                            session_no=session_no,
+                            filename=filename,
+                            format=fmt,
+                            storage_path=storage_path,
+                            download_url=download_url,
+                            is_available=is_avail,
+                            submission_status=sub_status,
+                            submitted_link=submitted_link,
+                            title=f"Unit {unit_no} Session {session_no} SLO {slo_no}",
+                        )
+                    )
+
+        logger.info(
+            "Discovered %d total worksheet entries (%d available) for course %s",
+            len(discovered), sum(1 for w in discovered if w.is_available), course_code
+        )
+        return discovered
+
     async def get_worksheet_file(
         self,
         course_code: str,
@@ -457,6 +607,24 @@ class SRMHttpClient(SRMClient):
                 return direct_static_url
         except Exception as static_err:
             logger.debug("Direct static URL probe failed for %s: %s", direct_static_url, static_err)
+
+        # 6. Fallback: If session < 100, try the unit 1 offset (e.g., session 1 -> 101)
+        if filename is None and int(session) < 100:
+            unit1_session = 100 + int(session)
+            unit1_filename = f"{unit1_session}{slo}.{fmt}"
+            try:
+                logger.debug("Trying unit 1 offset worksheet %s for session %s...", unit1_filename, session)
+                return await self.get_worksheet_file(
+                    course_code=course_code,
+                    session=unit1_session,
+                    slo=slo,
+                    format_type=fmt,
+                    filename=unit1_filename,
+                    path=target_path,
+                    server=server,
+                )
+            except WorksheetNotFound:
+                pass
 
         msg = data.get("msg") or "File not found on storage"
         raise WorksheetNotFound(

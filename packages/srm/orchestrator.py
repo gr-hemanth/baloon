@@ -16,6 +16,7 @@ from packages.srm.models import (
     SRMSessionStatus,
     SRMSubmissionResult,
     SRMWorksheetFile,
+    SRMWorksheetMetadata,
 )
 from packages.shared.config import settings
 
@@ -172,6 +173,28 @@ class SRMOrchestrator(SRMClient):
         except SRMTransportUnavailableError:
             return await self.browser_client.get_worksheet_file(
                 course_code, session, slo, format_type, filename, path, server
+            )
+
+    async def discover_worksheets(
+        self,
+        course_code: str,
+        batch_id: Optional[str] = None,
+        session: Optional[int] = None,
+        format_type: Optional[str] = None,
+        resolve_urls: bool = True,
+    ) -> List[SRMWorksheetMetadata]:
+        """Discover available worksheets for a course based on portal course status and session metadata."""
+        if self.mode == "browser":
+            return await self.browser_client.discover_worksheets(
+                course_code, batch_id, session, format_type, resolve_urls
+            )
+        try:
+            return await self.http_client.discover_worksheets(
+                course_code, batch_id, session, format_type, resolve_urls
+            )
+        except SRMTransportUnavailableError:
+            return await self.browser_client.discover_worksheets(
+                course_code, batch_id, session, format_type, resolve_urls
             )
 
     async def download_worksheet(

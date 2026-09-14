@@ -114,14 +114,25 @@ async def _run_job_workflow(job_id: str, credentials: Optional[Dict[str, Any]] =
             job_temp_dir = Path(tempfile.mkdtemp(prefix=f"srm_job_{job.id[:8]}_"))
             worksheet_filename = f"{session_num}1.docx"
 
-            # Resolve worksheet file URL using SRM document schema
+            # Resolve worksheet file URL using data-driven discovery & SRM document schema
             try:
-                file_url = await orchestrator.get_worksheet_file(
+                discovered = await orchestrator.discover_worksheets(
                     course_code=course_code,
                     session=session_num,
-                    slo=1,
                     format_type="docx",
                 )
+                available = [w for w in discovered if w.is_available]
+                if available:
+                    target_ws = available[0]
+                    file_url = target_ws.download_url
+                    worksheet_filename = target_ws.filename
+                else:
+                    file_url = await orchestrator.get_worksheet_file(
+                        course_code=course_code,
+                        session=session_num,
+                        slo=1,
+                        format_type="docx",
+                    )
                 downloaded_file = await orchestrator.download_worksheet(
                     file_url_or_id=file_url,
                     destination_dir=job_temp_dir,

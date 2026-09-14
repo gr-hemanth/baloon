@@ -67,6 +67,39 @@ class SRMSessionStatus:
 
 
 @dataclass
+class SRMCourseStatus:
+    course_code: str
+    session_count: List[Dict[str, Any]] = field(default_factory=list)
+    available_slp: List[int] = field(default_factory=list)  # Uploaded DOCX worksheet IDs
+    available_slppdf: List[int] = field(default_factory=list)  # Uploaded PDF worksheet IDs
+    available_practice: List[int] = field(default_factory=list)
+    assessments: List[int] = field(default_factory=list)
+    raw_result: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SRMWorksheetMetadata:
+    course_code: str
+    session: int
+    slo: int
+    filename: str
+    format: str  # "docx" or "pdf"
+    storage_path: str  # e.g. "data/coordinator/21CSC303J/slp"
+    unit: int = 1
+    session_no: int = 1
+    download_url: Optional[str] = None
+    is_available: bool = False
+    submission_status: str = "NOT_SUBMITTED"  # "NOT_SUBMITTED", "PENDING", "VERIFIED", "RESUBMISSION"
+    submitted_link: Optional[str] = None
+    title: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def identifier(self) -> str:
+        return f"{self.session}{self.slo}"
+
+
+@dataclass
 class SRMWorksheetFile:
     file_url: str
     filename: str
