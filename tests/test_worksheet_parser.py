@@ -424,18 +424,19 @@ def test_pdf_parser_abstraction(tmp_path: Path):
 
 
 def test_worksheet_processor_adapter(tmp_path: Path):
-    """Verify DefaultWorksheetProcessor wraps parser and respects deferred answering."""
+    """Verify DefaultWorksheetProcessor wraps parser and generates solutions."""
     docx_file = _create_synthetic_short_answer_docx(tmp_path / "processor_test.docx")
     processor = DefaultWorksheetProcessor()
 
-    parsed_dict = processor.parse_worksheet(docx_file)
-    assert isinstance(parsed_dict, dict)
-    assert "questions" in parsed_dict
-    assert len(parsed_dict["questions"]) == 4
+    parsed_data = processor.parse_worksheet(docx_file)
+    assert isinstance(parsed_data, dict)
+    assert "questions" in parsed_data
+    assert len(parsed_data["questions"]) == 4
 
-    with pytest.raises(NotImplementedError) as exc_info:
-        processor.process_solutions(parsed_dict)
-    assert "deferred" in str(exc_info.value).lower()
+    completed = processor.process_solutions(parsed_data)
+    assert completed.exists()
+    assert completed != docx_file
+    assert completed.name == "completed_processor_test.docx"
 
 
 def test_unified_worksheet_parser_dispatcher(tmp_path: Path):
