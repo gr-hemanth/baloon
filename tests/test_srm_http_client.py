@@ -504,11 +504,11 @@ async def test_submission_and_verification(http_client: SRMHttpClient):
         assert result.success is True
         assert result.returned_link == "https://drive.google.com/file/d/submitted_link/view"
 
-    # 2. Verification
+    # 2. Verification (exact matching)
     mock_status = SRMSessionStatus(
         session=1,
         practice_status={"11": 1},
-        slo_links={"11": "https://drive.google.com/file/d/submitted_link/view"},
+        slo_links={"11": "https://drive.google.com/file/d/submitted_link_1234567890/view"},
     )
     with patch.object(http_client, "get_session_status", new_callable=AsyncMock) as mock_get_status:
         mock_get_status.return_value = mock_status
@@ -516,7 +516,7 @@ async def test_submission_and_verification(http_client: SRMHttpClient):
         verified = await http_client.verify_submission(
             session_or_worksheet_id=1,
             slo=1,
-            expected_link="https://drive.google.com/file/d/submitted_link/view",
+            expected_link="https://drive.google.com/file/d/submitted_link_1234567890/view",
             course_info={"BATCH_ID": "B1"}
         )
         assert verified is True
@@ -526,9 +526,100 @@ async def test_submission_and_verification(http_client: SRMHttpClient):
             await http_client.verify_submission(
                 session_or_worksheet_id=1,
                 slo=1,
-                expected_link="https://drive.google.com/file/d/DIFFERENT_LINK",
+                expected_link="https://drive.google.com/file/d/DIFFERENT_LINK_0987654321/view",
                 course_info={"BATCH_ID": "B1"}
             )
+
+
+@pytest.mark.asyncio
+async def test_canonical_verification_scenarios(http_client: SRMHttpClient):
+    """Verify verify_submission handles real SRM normalizations: dict wrapping, /edit vs /view, query stripping."""
+    drive_file_id = "1h5JqmjkXDTZrDtDZrnTsj2Va6mp27bfS"
+    submitted_full_url = (
+        f"https://docs.google.com/document/d/{drive_file_id}/edit?usp=drivesdk&ouid=101921319167970497880&rtpof=true&sd=true"
+    )
+
+    # Scenario A: SRM returns dict {"view": "...", "download": "..."} with /edit stripped
+    mock_status_dict = SRMSessionStatus(
+        session=102,
+        practice_status={"1021": 1},
+        slo_links={"1021": {"view": f"https://docs.google.com/document/d/{drive_file_id}/edit", "download": ""}},
+    )
+    with patch.object(http_client, "get_session_status", new_callable=AsyncMock) as mock_get_status:
+        mock_get_status.return_value = mock_status_dict
+        verified = await http_client.verify_submission(
+            session_or_worksheet_id=102,
+            slo=1,
+            expected_link=submitted_full_url,
+            course_info={"BATCH_ID": "B1", "COURSE_CODE": "21LEM202T"},
+        )
+        assert verified is True
+
+    # Scenario B: SRM normalizes to canonical drive.google.com/file/d/.../view
+    mock_status_canonical = SRMSessionStatus(
+        session=102,
+        practice_status={"1021": 2},
+        slo_links={"1021": f"https://drive.google.com/file/d/{drive_file_id}/view"},
+    )
+    with patch.object(http_client, "get_session_status", new_callable=AsyncMock) as mock_get_status:
+        mock_get_status.return_value = mock_status_canonical
+        verified = await http_client.verify_submission(
+            session_or_worksheet_id=102,
+            slo=1,
+            expected_link=submitted_full_url,
+            course_info={"BATCH_ID": "B1", "COURSE_CODE": "21LEM202T"},
+        )
+        assert verified is True
+
+    # Scenario C: Key in SLOLINK is 2-digit "21" rather than 4-digit "1021"
+    mock_status_short_key = SRMSessionStatus(
+        session=102,
+        practice_status={"21": 1},
+        slo_links={"21": {"view": f"https://drive.google.com/file/d/{drive_file_id}/view"}},
+    )
+    with patch.object(http_client, "get_session_status", new_callable=AsyncMock) as mock_get_status:
+        mock_get_status.return_value = mock_status_short_key
+        verified = await http_client.verify_submission(
+            session_or_worksheet_id=102,
+            slo=1,
+            expected_link=submitted_full_url,
+            course_info={"BATCH_ID": "B1", "COURSE_CODE": "21LEM202T"},
+        )
+        assert verified is True
+
+    # Scenario D: Rejection on different Google Drive file ID
+    mock_status_wrong_id = SRMSessionStatus(
+        session=102,
+        practice_status={"1021": 1},
+        slo_links={"1021": {"view": "https://drive.google.com/file/d/WRONG_DIFFERENT_FILE_ID_12345/view"}},
+    )
+    with patch.object(http_client, "get_session_status", new_callable=AsyncMock) as mock_get_status:
+        mock_get_status.return_value = mock_status_wrong_id
+        with pytest.raises(VerificationFailed) as exc_info:
+            await http_client.verify_submission(
+                session_or_worksheet_id=102,
+                slo=1,
+                expected_link=submitted_full_url,
+                course_info={"BATCH_ID": "B1", "COURSE_CODE": "21LEM202T"},
+            )
+        assert "recorded link does not match" in str(exc_info.value)
+
+    # Scenario E: Rejection when no link is recorded on SRM
+    mock_status_no_link = SRMSessionStatus(
+        session=102,
+        practice_status={"1021": 0},
+        slo_links={},
+    )
+    with patch.object(http_client, "get_session_status", new_callable=AsyncMock) as mock_get_status:
+        mock_get_status.return_value = mock_status_no_link
+        with pytest.raises(VerificationFailed) as exc_info:
+            await http_client.verify_submission(
+                session_or_worksheet_id=102,
+                slo=1,
+                expected_link=submitted_full_url,
+                course_info={"BATCH_ID": "B1", "COURSE_CODE": "21LEM202T"},
+            )
+        assert "no recorded link found" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
