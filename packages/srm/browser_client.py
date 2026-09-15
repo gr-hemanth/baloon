@@ -122,6 +122,11 @@ class SRMBrowserClient(SRMClient):
     async def capture_login_captcha(self) -> Optional[Dict[str, Any]]:
         """Navigate to login page and capture the 6-digit canvas CAPTCHA image."""
         page = await self._init_browser()
+        if page.url == "about:blank" or not page.url.startswith("http"):
+            try:
+                await page.goto(self.base_url, wait_until="domcontentloaded", timeout=15000)
+            except Exception as e:
+                logger.warning("Could not navigate to portal for captcha: %s", e)
         # Click "START LEARNING" if on landing page
         start_btn = page.get_by_text("START LEARNING", exact=False).first
         if await start_btn.count() > 0 and await start_btn.is_visible():

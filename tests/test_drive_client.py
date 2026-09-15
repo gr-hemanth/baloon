@@ -34,12 +34,20 @@ def drive_client() -> GoogleDriveClient:
 def test_authorization_url_generation(drive_client: GoogleDriveClient):
     """Verify Google OAuth 2.0 authorization URL contains required parameters."""
     url = drive_client.get_authorization_url(state="test_state_123")
-    assert "https://accounts.google.com/o/oauth2/v2/auth" in url
+    assert "https://accounts.google.com/o/oauth2/v2/auth?" in url
+    assert "?response_type=code&" in url
     assert "client_id=mock-client-id.apps.googleusercontent.com" in url
     assert "redirect_uri=http%3A%2F%2Flocalhost%3A8000%2Fcallback" in url
-    assert "response_type=code" in url
+    assert "scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file" in url
     assert "access_type=offline" in url
+    assert "prompt=consent" in url
     assert "state=test_state_123" in url
+
+    # Verify auto-generated state when omitted
+    auto_url = drive_client.get_authorization_url()
+    assert "?response_type=code&" in auto_url
+    assert "state=" in auto_url
+    assert drive_client.state is not None
 
 
 def test_authorization_url_missing_client_id():

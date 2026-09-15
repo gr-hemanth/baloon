@@ -66,7 +66,13 @@ class SRMOrchestrator(SRMClient):
 
     async def capture_login_captcha(self) -> Optional[Dict[str, Any]]:
         """Use Playwright to capture the login page CAPTCHA canvas."""
-        return await self.browser_client.capture_login_captcha()
+        if self.mode == "http":
+            return None
+        try:
+            return await self.browser_client.capture_login_captcha()
+        except Exception as exc:
+            logger.warning("Browser CAPTCHA capture unavailable: %s", exc)
+            return None
 
     async def authenticate(self, credentials: Dict[str, Any]) -> bool:
         """Authenticate student with portal credentials.

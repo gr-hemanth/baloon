@@ -8,16 +8,29 @@ Provides an extensible, provider-agnostic answer generation pipeline supporting:
 - Pluggable AI and Rule-based providers with confidence scoring and error recovery
 """
 
+import json
 import logging
 import os
 import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
+import httpx
+
+from packages.shared.config import settings
 from packages.worksheets.answer_models import (
     AnswerStatus,
     GeneratedAnswer,
     WorksheetAnswers,
+)
+from packages.worksheets.exceptions import (
+    AnswerEngineError,
+    LLMAuthenticationError,
+    LLMNetworkError,
+    LLMRateLimitError,
+    LLMResponseError,
+    LLMTimeoutError,
+    MissingAnswerError,
 )
 from packages.worksheets.models import ParsedQuestion, ParsedWorksheet, QuestionType
 
@@ -486,90 +499,697 @@ class RuleBasedAnswerEngine(BaseAnswerEngine):
 
 
 class LLMAnswerEngine(BaseAnswerEngine):
-    """Extensible AI-driven answer engine supporting Gemini and other LLM providers.
-    
-    Checks environment for configured provider credentials. If credentials are
-    not set, cleanly falls back to the deterministic RuleBasedAnswerEngine.
+    """Production-grade AI-driven answer engine supporting FreeLLM (OpenAI-compatible) and Gemini.
+
+    Features:
+    - Native async requests via httpx.
+    - FreeLLM support using standard OpenAI-compatible /chat/completions endpoint.
+    - Gemini support using generativelanguage.googleapis.com REST API.
+    - Structured JSON prompt containing complete question context (type, options, marks, section, activity).
+    - Guaranteed structured JSON output via response_format/responseMimeType.
+    - Multi-stage answer validation ensuring every question is answered with valid confidence and text.
+    - Explicit exception raising on API/network/schema failures (NO silent fallback to rule engine).
+    - Rule-based fallback ONLY when explicitly unconfigured and fallback is permitted.
+    - Strict redaction of API keys from repr, str, logs, and exception strings.
+    - Configurable base_url, model, temperature, and timeout via settings/environment.
     """
 
     def __init__(
         self,
-        provider: str = "gemini",
+        provider: str = "freellm",
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_output_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
+        allow_fallback_when_unconfigured: bool = False,
         fallback_engine: Optional[BaseAnswerEngine] = None,
+        http_client: Optional[httpx.AsyncClient] = None,
     ):
-        self.provider = provider
+        self.provider = provider.lower()
+        if self.provider in ("freellm", "free_llm"):
+            self.provider = "freellm"
+            self._api_key = (
+                api_key
+                or getattr(settings, "FREELLM_API_KEY", None)
+                or os.getenv("FREELLM_API_KEY")
+            )
+            self.base_url = (
+                base_url
+                or getattr(settings, "FREELLM_BASE_URL", None)
+                or os.getenv("FREELLM_BASE_URL", "http://127.0.0.1:31415/v1")
+            ).rstrip("/")
+            self.model = (
+                model
+                or getattr(settings, "FREELLM_MODEL", None)
+                or os.getenv("FREELLM_MODEL", "default")
+            )
+            self.temperature = (
+                temperature
+                if temperature is not None
+                else getattr(settings, "FREELLM_TEMPERATURE", 0.2)
+            )
+            self.timeout = (
+                timeout
+                if timeout is not None
+                else getattr(settings, "FREELLM_TIMEOUT_SECONDS", 60.0)
+            )
+        elif self.provider in ("gemini", "llm"):
+            self.provider = "gemini"
+            self._api_key = (
+                api_key
+                or getattr(settings, "GEMINI_API_KEY", None)
+                or os.getenv("GEMINI_API_KEY")
+            )
+            self.base_url = (
+                base_url
+                or "https://generativelanguage.googleapis.com/v1beta/models"
+            ).rstrip("/")
+            self.model = (
+                model
+                or getattr(settings, "GEMINI_MODEL", None)
+                or os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+            )
+            self.temperature = (
+                temperature
+                if temperature is not None
+                else getattr(settings, "GEMINI_TEMPERATURE", 0.2)
+            )
+            self.timeout = (
+                timeout
+                if timeout is not None
+                else getattr(settings, "GEMINI_TIMEOUT_SECONDS", 60.0)
+            )
+        elif self.provider == "openai":
+            self.provider = "openai"
+            self._api_key = (
+                api_key
+                or getattr(settings, "OPENAI_API_KEY", None)
+                or os.getenv("OPENAI_API_KEY")
+            )
+            self.base_url = (
+                base_url
+                or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+            ).rstrip("/")
+            self.model = (
+                model
+                or getattr(settings, "OPENAI_MODEL", None)
+                or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            )
+            self.temperature = temperature if temperature is not None else 0.2
+            self.timeout = timeout if timeout is not None else 60.0
+        else:
+            self._api_key = api_key
+            self.base_url = (base_url or "http://127.0.0.1:31415/v1").rstrip("/")
+            self.model = model or "default"
+            self.temperature = temperature if temperature is not None else 0.2
+            self.timeout = timeout if timeout is not None else 60.0
+
+        self.max_output_tokens = (
+            max_output_tokens
+            if max_output_tokens is not None
+            else getattr(settings, "GEMINI_MAX_OUTPUT_TOKENS", 4096)
+        )
+        self.allow_fallback_when_unconfigured = allow_fallback_when_unconfigured
         self.fallback_engine = fallback_engine or RuleBasedAnswerEngine()
-        self._api_key = os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        self._http_client = http_client
 
     @property
     def is_configured(self) -> bool:
         """Check whether live AI credentials are present without exposing them."""
         return bool(self._api_key)
 
+    def __repr__(self) -> str:
+        has_key = bool(self._api_key)
+        return (
+            f"LLMAnswerEngine(provider='{self.provider}', model='{self.model}', "
+            f"base_url='{self.base_url}', has_api_key={has_key}, temperature={self.temperature})"
+        )
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create shared httpx.AsyncClient."""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=self.timeout)
+        return self._http_client
+
+    async def close(self) -> None:
+        """Clean up underlying HTTP client resources."""
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+
     async def generate_answers(
         self,
         worksheet: ParsedWorksheet,
         context: Optional[Dict[str, Any]] = None,
     ) -> WorksheetAnswers:
-        """Generate answers utilizing LLM when configured, or graceful fallback."""
+        """Generate answers utilizing configured LLM API (FreeLLM/Gemini), or graceful offline fallback."""
         if not self.is_configured:
-            logger.info("No AI provider API key found; utilizing deterministic answer engine.")
-            return await self.fallback_engine.generate_answers(worksheet, context)
+            if self.allow_fallback_when_unconfigured:
+                logger.info("No AI provider API key found; utilizing deterministic fallback engine.")
+                return await self.fallback_engine.generate_answers(worksheet, context)
+            key_name = f"{self.provider.upper()}_API_KEY"
+            raise LLMAuthenticationError(
+                f"{key_name} is not configured in environment or settings."
+            )
 
-        # Live provider integration hook (extensible for Gemini / OpenAI client)
-        logger.info("Generating answers via configured AI provider: %s [KEY CONFIGURED]", self.provider)
-        try:
-            return await self._generate_via_ai(worksheet, context)
-        except Exception as exc:
-            logger.warning("AI provider call encountered error: %s. Falling back to rule engine.", exc)
-            return await self.fallback_engine.generate_answers(worksheet, context)
+        if not worksheet.questions:
+            return WorksheetAnswers(
+                worksheet_filename=worksheet.filename,
+                answers=[],
+                provider=self.provider,
+                metadata={"course_code": worksheet.course_code, "total": 0},
+            )
+
+        logger.info(
+            "Calling %s API (endpoint=%s, model=%s) for %d questions in worksheet %s",
+            self.provider,
+            self.base_url,
+            self.model,
+            len(worksheet.questions),
+            worksheet.filename,
+        )
+
+        if self.provider in ("freellm", "openai"):
+            return await self._generate_openai_compatible_answers(worksheet, context)
+        elif self.provider in ("gemini", "llm"):
+            return await self._generate_gemini_answers(worksheet, context)
+        else:
+            raise ValueError(f"Unsupported AI provider: '{self.provider}'")
 
     async def answer_question(
         self,
         question: ParsedQuestion,
         worksheet_context: Optional[Dict[str, Any]] = None,
     ) -> GeneratedAnswer:
-        """Generate single question answer with fallback."""
+        """Generate answer for an individual question."""
         if not self.is_configured:
-            return await self.fallback_engine.answer_question(question, worksheet_context)
-        try:
-            return await self._answer_question_via_ai(question, worksheet_context)
-        except Exception as exc:
-            logger.warning("AI question call failed: %s, falling back", exc)
-            return await self.fallback_engine.answer_question(question, worksheet_context)
+            if self.allow_fallback_when_unconfigured:
+                return await self.fallback_engine.answer_question(question, worksheet_context)
+            key_name = f"{self.provider.upper()}_API_KEY"
+            raise LLMAuthenticationError(
+                f"{key_name} is not configured in environment or settings."
+            )
 
-    async def _generate_via_ai(
+        mini_ws = ParsedWorksheet(
+            filename=f"single_{question.question_id}.docx",
+            file_format="docx",
+            questions=[question],
+            course_code=(worksheet_context or {}).get("course_code", ""),
+            title=(worksheet_context or {}).get("course_name", ""),
+            session=(worksheet_context or {}).get("session", 1),
+            slo=(worksheet_context or {}).get("slo", 1),
+        )
+        answers = await self.generate_answers(mini_ws, worksheet_context)
+        if not answers.answers:
+            raise LLMResponseError(f"No answer returned by {self.provider} for question {question.question_id}")
+        return answers.answers[0]
+
+    def _build_questions_payload(self, worksheet: ParsedWorksheet) -> list:
+        """Serialize parsed questions into structured JSON-compatible list."""
+        questions_payload = []
+        for q in worksheet.questions:
+            options_list = []
+            for opt in (q.options or []):
+                if hasattr(opt, "key") and hasattr(opt, "text"):
+                    options_list.append(f"{opt.key}. {opt.text}")
+                elif isinstance(opt, dict):
+                    k = opt.get("key", "")
+                    t = opt.get("text", "")
+                    options_list.append(f"{k}. {t}" if k else str(t))
+                else:
+                    options_list.append(str(opt))
+
+            questions_payload.append({
+                "question_id": q.question_id,
+                "question_number": q.question_number,
+                "question_type": q.question_type.value if hasattr(q.question_type, "value") else str(q.question_type),
+                "question_text": q.question_text,
+                "options": options_list,
+                "marks": q.marks,
+                "section": q.section,
+                "context_or_activity": q.context_or_activity,
+            })
+        return questions_payload
+
+    def _map_and_validate_answers(
+        self,
+        answers_list: list,
+        worksheet: ParsedWorksheet,
+    ) -> WorksheetAnswers:
+        """Map and validate parsed model answers against target worksheet questions."""
+        answers_by_id: Dict[str, Dict[str, Any]] = {}
+        answers_by_num: Dict[str, Dict[str, Any]] = {}
+
+        for ans_dict in answers_list:
+            if isinstance(ans_dict, dict):
+                qid = str(ans_dict.get("question_id", "")).strip()
+                if qid:
+                    answers_by_id[qid] = ans_dict
+                qnum = str(ans_dict.get("question_number", "")).strip()
+                if qnum:
+                    answers_by_num[qnum] = ans_dict
+
+        generated_answers: List[GeneratedAnswer] = []
+        missing_count = 0
+
+        for question in worksheet.questions:
+            ans_data = answers_by_id.get(question.question_id)
+            if not ans_data and question.question_number:
+                ans_data = answers_by_num.get(str(question.question_number))
+
+            if ans_data:
+                ans_text = str(ans_data.get("answer_text", "")).strip()
+                if not ans_text:
+                    ans_text = "[Empty answer returned by AI]"
+                    status = AnswerStatus.LOW_CONFIDENCE
+                    conf = 0.2
+                else:
+                    try:
+                        conf = float(ans_data.get("confidence", 0.95))
+                        conf = max(0.0, min(1.0, conf))
+                    except (ValueError, TypeError):
+                        conf = 0.95
+                    status = AnswerStatus.SUCCESS if conf >= 0.5 else AnswerStatus.LOW_CONFIDENCE
+
+                sel_opt = ans_data.get("selected_option")
+                if sel_opt:
+                    sel_opt = str(sel_opt).strip().upper()
+                elif question.question_type == QuestionType.MCQ and ans_text:
+                    opt_match = re.match(r"^([A-D])[\.\)\:\s]", ans_text.upper())
+                    if opt_match:
+                        sel_opt = opt_match.group(1)
+
+                generated_answers.append(
+                    GeneratedAnswer(
+                        question_id=question.question_id,
+                        question_number=question.question_number,
+                        question_type=question.question_type,
+                        answer_text=ans_text,
+                        selected_option=sel_opt,
+                        confidence=conf,
+                        explanation=ans_data.get("explanation"),
+                        status=status,
+                        metadata={"provider": self.provider, "model": self.model},
+                    )
+                )
+            else:
+                missing_count += 1
+                generated_answers.append(
+                    GeneratedAnswer(
+                        question_id=question.question_id,
+                        question_number=question.question_number,
+                        question_type=question.question_type,
+                        answer_text="[Question omitted from AI response - manual review required]",
+                        selected_option=None,
+                        confidence=0.0,
+                        status=AnswerStatus.ERROR,
+                        error_message="Question omitted by AI provider",
+                        metadata={"provider": self.provider, "model": self.model},
+                    )
+                )
+
+        if missing_count == len(worksheet.questions) and len(worksheet.questions) > 0:
+            raise MissingAnswerError(f"{self.provider.upper()} returned zero answers matching worksheet questions.")
+
+        return WorksheetAnswers(
+            worksheet_filename=worksheet.filename,
+            answers=generated_answers,
+            provider=self.provider,
+            metadata={
+                "course_code": worksheet.course_code,
+                "model": self.model,
+                "total": len(generated_answers),
+                "missing": missing_count,
+            },
+        )
+
+    async def _generate_openai_compatible_answers(
         self,
         worksheet: ParsedWorksheet,
-        context: Optional[Dict[str, Any]],
+        context: Optional[Dict[str, Any]] = None,
     ) -> WorksheetAnswers:
-        """Placeholder for direct LLM API invocation."""
-        # For Milestone 5, fall back to rule engine while preserving interface
-        return await self.fallback_engine.generate_answers(worksheet, context)
+        """Execute chat completion request against OpenAI-compatible API (e.g. FreeLLM)."""
+        questions_payload = self._build_questions_payload(worksheet)
 
-    async def _answer_question_via_ai(
+        ws_context = {
+            "course_code": worksheet.course_code or (context or {}).get("course_code", ""),
+            "course_name": worksheet.title or (context or {}).get("course_name", ""),
+            "session": worksheet.session or (context or {}).get("session", ""),
+            "slo": worksheet.slo or (context or {}).get("slo", ""),
+        }
+
+        system_prompt = (
+            "You are an expert academic evaluator and university professor.\n"
+            "You must solve the user's exam/worksheet questions accurately and completely.\n"
+            "CRITICAL: You MUST respond ONLY with a valid JSON object matching this schema:\n"
+            "{\n"
+            '  "answers": [\n'
+            "    {\n"
+            '      "question_id": "<exact question_id from input>",\n'
+            '      "question_number": "<question_number or null>",\n'
+            '      "answer_text": "<answer text>",\n'
+            '      "selected_option": "<option letter like A, B, C, D if MCQ, otherwise null>",\n'
+            '      "confidence": <float 0.0 to 1.0>,\n'
+            '      "explanation": "<brief rationale>"\n'
+            "    }\n"
+            "  ]\n"
+            "}"
+        )
+
+        user_prompt = (
+            f"Worksheet Context:\n"
+            f"- Course Code: {ws_context['course_code']}\n"
+            f"- Course Title: {ws_context['course_name']}\n"
+            f"- Session: {ws_context['session']}\n"
+            f"- SLO: {ws_context['slo']}\n\n"
+            "Guidelines per question type:\n"
+            "1. MCQ (Multiple Choice):\n"
+            "   - In 'selected_option', put the exact option letter (A, B, C, or D).\n"
+            "   - In 'answer_text', provide the selected option text.\n"
+            "   - In 'confidence', float between 0.0 and 1.0 (typically 0.9-1.0).\n"
+            "2. ONE_WORD / Fill-in-the-blank / True-False:\n"
+            "   - In 'answer_text', provide the concise exact term, acronym expansion, or True/False.\n"
+            "3. SHORT_ANSWER:\n"
+            "   - In 'answer_text', provide 2-4 comprehensive, structured technical sentences or points.\n"
+            "4. LONG_ANSWER / Case Study / Workshop / Simulation:\n"
+            "   - In 'answer_text', provide thorough, structured technical answers with clear headings or deliverables.\n\n"
+            "Questions to answer:\n"
+            f"{json.dumps(questions_payload, indent=2)}"
+        )
+
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        # For FreeLLM automatic model routing, FreeLLMAPI routes automatically when model="auto"
+        # while keeping the user-facing/default configuration model="default".
+        request_model = "auto" if (self.provider == "freellm" and self.model in ("default", "auto")) else self.model
+        body = {
+            "model": request_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": self.temperature,
+            "response_format": {"type": "json_object"},
+        }
+
+        client = await self._get_client()
+
+        try:
+            resp = await client.post(url, headers=headers, json=body, timeout=self.timeout)
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(f"{self.provider.upper()} API request timed out after {self.timeout}s") from exc
+        except httpx.RequestError as exc:
+            raise LLMNetworkError(f"{self.provider.upper()} network request failed: {exc}") from exc
+
+        # Handle HTTP error status codes without leaking secrets
+        if resp.status_code in (401, 403):
+            err_data = resp.json() if "application/json" in resp.headers.get("content-type", "") else {}
+            msg = err_data.get("error", {}).get("message") or resp.text
+            raise LLMAuthenticationError(f"{self.provider.upper()} authentication failed ({resp.status_code}): {msg}")
+
+        if resp.status_code == 429:
+            err_data = resp.json() if "application/json" in resp.headers.get("content-type", "") else {}
+            msg = err_data.get("error", {}).get("message") or resp.text
+            raise LLMRateLimitError(f"{self.provider.upper()} rate limit exceeded ({resp.status_code}): {msg}", status_code=429)
+
+        if resp.status_code >= 400:
+            err_data = resp.json() if "application/json" in resp.headers.get("content-type", "") else {}
+            msg = err_data.get("error", {}).get("message") or resp.text
+            raise LLMResponseError(f"{self.provider.upper()} API returned error ({resp.status_code}): {msg}")
+
+        # Parse JSON response
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise LLMResponseError(f"Failed to parse {self.provider.upper()} response as JSON: {exc}") from exc
+
+        choices = data.get("choices", [])
+        if not choices:
+            raise LLMResponseError(f"{self.provider.upper()} returned no completion choices.")
+
+        choice = choices[0]
+        message = choice.get("message", {})
+        raw_content = message.get("content", "")
+        if not raw_content or not str(raw_content).strip():
+            raise LLMResponseError(f"{self.provider.upper()} returned empty content in message.")
+
+        # Clean JSON in case model wrapped it in markdown fences
+        cleaned_json = str(raw_content).strip()
+        if cleaned_json.startswith("```"):
+            lines = cleaned_json.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            cleaned_json = "\n".join(lines).strip()
+
+        try:
+            parsed_output = json.loads(cleaned_json)
+        except Exception as exc:
+            raise LLMResponseError(
+                f"Malformed JSON in {self.provider.upper()} text output: {exc}",
+                raw_response=str(raw_content),
+            ) from exc
+
+        answers_list = None
+        if isinstance(parsed_output, list):
+            answers_list = parsed_output
+        elif isinstance(parsed_output, dict):
+            for key in ("answers", "results", "questions", "data", "responses"):
+                if key in parsed_output and isinstance(parsed_output[key], list):
+                    answers_list = parsed_output[key]
+                    break
+            if answers_list is None:
+                # Check if dict is keyed by question_id (e.g. {"q_1": {...}, ...})
+                candidate_list = []
+                for k, v in parsed_output.items():
+                    if isinstance(v, dict):
+                        item = dict(v)
+                        if "question_id" not in item:
+                            item["question_id"] = k
+                        candidate_list.append(item)
+                if candidate_list:
+                    answers_list = candidate_list
+
+        if not isinstance(answers_list, list):
+            raise LLMResponseError(
+                f"{self.provider.upper()} output JSON does not contain a recognizable list of answers.",
+                raw_response=str(raw_content),
+            )
+
+        return self._map_and_validate_answers(answers_list, worksheet)
+
+    async def _generate_gemini_answers(
         self,
-        question: ParsedQuestion,
-        worksheet_context: Optional[Dict[str, Any]],
-    ) -> GeneratedAnswer:
-        """Placeholder for single question LLM invocation."""
-        return await self.fallback_engine.answer_question(question, worksheet_context)
+        worksheet: ParsedWorksheet,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> WorksheetAnswers:
+        """Perform real HTTP request to Gemini REST API and process structured JSON response."""
+        questions_payload = self._build_questions_payload(worksheet)
+
+        ws_context = {
+            "course_code": worksheet.course_code or (context or {}).get("course_code", ""),
+            "course_name": worksheet.title or (context or {}).get("course_name", ""),
+            "session": worksheet.session or (context or {}).get("session", ""),
+            "slo": worksheet.slo or (context or {}).get("slo", ""),
+        }
+
+        prompt = (
+            "You are an expert academic evaluator and university professor.\n"
+            "Generate complete, technically rigorous, and accurate answers for every question in the following SRM eCurricula worksheet.\n\n"
+            f"Worksheet Context:\n"
+            f"- Course Code: {ws_context['course_code']}\n"
+            f"- Course Title: {ws_context['course_name']}\n"
+            f"- Session: {ws_context['session']}\n"
+            f"- SLO: {ws_context['slo']}\n\n"
+            "Guidelines per question type:\n"
+            "1. MCQ (Multiple Choice):\n"
+            "   - In 'selected_option', put the exact option letter (A, B, C, or D).\n"
+            "   - In 'answer_text', provide the selected option text.\n"
+            "   - In 'confidence', float between 0.0 and 1.0 (typically 0.9-1.0).\n"
+            "2. ONE_WORD / Fill-in-the-blank / True-False:\n"
+            "   - In 'answer_text', provide the concise exact term, acronym expansion, or True/False.\n"
+            "3. SHORT_ANSWER:\n"
+            "   - In 'answer_text', provide 2-4 comprehensive, structured technical sentences or points.\n"
+            "4. LONG_ANSWER / Case Study / Workshop / Simulation:\n"
+            "   - In 'answer_text', provide thorough, structured technical answers with clear headings or deliverables.\n\n"
+            "Questions to answer:\n"
+            f"{json.dumps(questions_payload, indent=2)}\n\n"
+            "CRITICAL REQUIREMENT:\n"
+            "You MUST return a valid JSON object matching this schema exactly:\n"
+            "{\n"
+            '  "answers": [\n'
+            "    {\n"
+            '      "question_id": "<exact question_id from input>",\n'
+            '      "question_number": "<question_number or null>",\n'
+            '      "answer_text": "<the answer text>",\n'
+            '      "selected_option": "<option letter if MCQ, otherwise null>",\n'
+            '      "confidence": <float between 0.0 and 1.0>,\n'
+            '      "explanation": "<brief rationale>"\n'
+            "    }\n"
+            "  ]\n"
+            "}"
+        )
+
+        url = f"{self.base_url}/{self.model}:generateContent"
+        headers = {
+            "x-goog-api-key": self._api_key,
+            "Content-Type": "application/json",
+        }
+        body = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": self.max_output_tokens,
+                "responseMimeType": "application/json",
+            }
+        }
+
+        client = await self._get_client()
+
+        try:
+            resp = await client.post(url, headers=headers, json=body, timeout=self.timeout)
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(f"Gemini API request timed out after {self.timeout}s") from exc
+        except httpx.RequestError as exc:
+            raise LLMNetworkError(f"Gemini network request failed: {exc}") from exc
+
+        # Handle HTTP error status codes without leaking secrets
+        if resp.status_code in (400, 401, 403):
+            err_data = resp.json() if "application/json" in resp.headers.get("content-type", "") else {}
+            msg = err_data.get("error", {}).get("message") or resp.text
+            raise LLMAuthenticationError(f"Gemini authentication failed ({resp.status_code}): {msg}")
+
+        if resp.status_code == 429:
+            err_data = resp.json() if "application/json" in resp.headers.get("content-type", "") else {}
+            msg = err_data.get("error", {}).get("message") or resp.text
+            raise LLMRateLimitError(f"Gemini rate limit exceeded ({resp.status_code}): {msg}", status_code=429)
+
+        if resp.status_code >= 400:
+            err_data = resp.json() if "application/json" in resp.headers.get("content-type", "") else {}
+            msg = err_data.get("error", {}).get("message") or resp.text
+            raise LLMResponseError(f"Gemini API returned error ({resp.status_code}): {msg}")
+
+        # Parse Gemini response JSON
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise LLMResponseError(f"Failed to parse Gemini response as JSON: {exc}") from exc
+
+        candidates = data.get("candidates", [])
+        if not candidates:
+            prompt_feedback = data.get("promptFeedback", {})
+            block_reason = prompt_feedback.get("blockReason")
+            if block_reason:
+                raise LLMResponseError(f"Gemini prompt blocked: {block_reason}")
+            raise LLMResponseError("Gemini returned no response candidates.")
+
+        candidate = candidates[0]
+        finish_reason = candidate.get("finishReason")
+        if finish_reason == "SAFETY":
+            raise LLMResponseError("Gemini generation was blocked by safety filters.")
+
+        content = candidate.get("content", {})
+        parts = content.get("parts", [])
+        if not parts:
+            raise LLMResponseError("Gemini candidate contains no content parts.")
+
+        raw_text = parts[0].get("text", "").strip()
+        if not raw_text:
+            raise LLMResponseError("Gemini returned empty text in response.")
+
+        # Clean JSON text in case of markdown code fences
+        cleaned_json = raw_text
+        if cleaned_json.startswith("```"):
+            lines = cleaned_json.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            cleaned_json = "\n".join(lines).strip()
+
+        try:
+            parsed_output = json.loads(cleaned_json)
+        except Exception as exc:
+            raise LLMResponseError(f"Malformed JSON in Gemini text output: {exc}", raw_response=raw_text) from exc
+
+        if not isinstance(parsed_output, dict) or "answers" not in parsed_output:
+            raise LLMResponseError("Gemini output JSON does not contain 'answers' list.")
+
+        answers_list = parsed_output.get("answers", [])
+        if not isinstance(answers_list, list):
+            raise LLMResponseError("Gemini 'answers' field is not a list.")
+
+        return self._map_and_validate_answers(answers_list, worksheet)
 
 
 class AnswerEngineFactory:
     """Factory creating configured answer engine instances."""
 
     @staticmethod
-    def get_engine(provider: Optional[str] = None) -> BaseAnswerEngine:
+    def get_engine(
+        provider: Optional[str] = None,
+        allow_fallback_when_unconfigured: Optional[bool] = None,
+    ) -> BaseAnswerEngine:
         """Obtain an appropriate answer engine instance.
-        
+
         Args:
-            provider: Optional provider name ('rule', 'mock', 'gemini', 'openai').
+            provider: Optional provider name ('rule', 'mock', 'freellm', 'gemini', 'openai', 'llm').
+            allow_fallback_when_unconfigured: If True, allows fallback to RuleBasedAnswerEngine
+                if the requested LLM provider credentials are not set. Defaults to False when
+                explicitly requesting 'freellm' or 'gemini' so missing keys cause clear failures.
         """
-        p = (provider or os.getenv("WORKSHEET_ANSWER_PROVIDER", "rule")).lower()
-        if p in ("rule", "mock", "template", "default"):
+        env_provider = (
+            provider
+            or getattr(settings, "WORKSHEET_ANSWER_PROVIDER", None)
+            or os.getenv("WORKSHEET_ANSWER_PROVIDER", "rule")
+        ).lower()
+
+        if env_provider in ("rule", "mock", "template", "default"):
             return RuleBasedAnswerEngine()
-        elif p in ("gemini", "openai", "llm"):
-            return LLMAnswerEngine(provider=p)
+        elif env_provider in ("freellm", "free_llm"):
+            fallback_flag = (
+                allow_fallback_when_unconfigured
+                if allow_fallback_when_unconfigured is not None
+                else False
+            )
+            return LLMAnswerEngine(
+                provider="freellm",
+                allow_fallback_when_unconfigured=fallback_flag,
+            )
+        elif env_provider in ("gemini", "llm"):
+            fallback_flag = (
+                allow_fallback_when_unconfigured
+                if allow_fallback_when_unconfigured is not None
+                else False
+            )
+            return LLMAnswerEngine(
+                provider="gemini",
+                allow_fallback_when_unconfigured=fallback_flag,
+            )
+        elif env_provider == "openai":
+            fallback_flag = (
+                allow_fallback_when_unconfigured
+                if allow_fallback_when_unconfigured is not None
+                else False
+            )
+            return LLMAnswerEngine(
+                provider="openai",
+                allow_fallback_when_unconfigured=fallback_flag,
+            )
         else:
             return RuleBasedAnswerEngine()
+

@@ -36,6 +36,21 @@ class Settings(BaseSettings):
     GOOGLE_DRIVE_REFRESH_TOKEN: Optional[str] = None
     GOOGLE_DRIVE_FOLDER_ID: Optional[str] = None
 
+    # AI Answer Engine Configuration
+    WORKSHEET_ANSWER_PROVIDER: str = "rule"  # "rule", "freellm", "gemini", "openai"
+    FREELLM_BASE_URL: str = "http://127.0.0.1:31415/v1"
+    FREELLM_API_KEY: Optional[str] = None
+    FREELLM_MODEL: str = "default"
+    FREELLM_TEMPERATURE: float = 0.2
+    FREELLM_TIMEOUT_SECONDS: float = 60.0
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_MODEL: str = "gemini-1.5-flash"
+    GEMINI_TEMPERATURE: float = 0.2
+    GEMINI_MAX_OUTPUT_TOKENS: int = 4096
+    GEMINI_TIMEOUT_SECONDS: float = 60.0
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_MODEL: str = "gpt-4o-mini"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -1,12 +1,25 @@
+import sys
+import asyncio
+if sys.platform == "win32":
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
+
+from pathlib import Path
 from contextlib import asynccontextmanager
 import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from packages.shared.config import settings
 from packages.shared.database import init_db
 from apps.api.routes.health import router as health_router
 from apps.api.routes.jobs import router as jobs_router
+from apps.api.routes.auth import router as auth_router
+from apps.api.routes.srm import router as srm_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("srm_api")
@@ -39,7 +52,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*", "X-Existing-Job-Id"],
 )
+
+# Static files for dashboard assets
+static_dir = Path(__file__).resolve().parent / "static"
+static_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 # Root-level health check endpoint (as specified: GET /health -> {"status": "ok"})
 app.include_router(health_router)
@@ -48,11 +67,27 @@ app.include_router(health_router)
 app.include_router(jobs_router)
 app.include_router(jobs_router, prefix=settings.API_V1_STR)
 
+# Google Drive Auth routes
+app.include_router(auth_router)
+app.include_router(auth_router, prefix=settings.API_V1_STR)
+
+# SRM Discovery routes
+app.include_router(srm_router)
+app.include_router(srm_router, prefix=settings.API_V1_STR)
+
+
+@app.get("/dashboard", response_class=FileResponse, include_in_schema=False)
+def dashboard_page():
+    """Production user dashboard interface."""
+    dashboard_file = static_dir / "dashboard.html"
+    return FileResponse(str(dashboard_file))
+
 
 @app.get("/")
 def root():
     return {
         "message": "SRM eCurricula Automation Platform API",
+        "dashboard": "/dashboard",
         "docs": "/docs",
         "health": "/health",
         "jobs": "/jobs"

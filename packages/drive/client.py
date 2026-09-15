@@ -4,6 +4,7 @@ import json
 import logging
 import mimetypes
 import os
+import secrets
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -71,26 +72,49 @@ class GoogleDriveClient(BaseDriveClient):
     DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
     DEFAULT_SCOPE = "https://www.googleapis.com/auth/drive.file"
 
+    _UNSET = object()
+
     def __init__(
         self,
-        client_id: Optional[str] = None,
-        client_secret: Optional[str] = None,
-        redirect_uri: Optional[str] = None,
-        access_token: Optional[str] = None,
-        refresh_token: Optional[str] = None,
+        client_id: Optional[str] = _UNSET,
+        client_secret: Optional[str] = _UNSET,
+        redirect_uri: Optional[str] = _UNSET,
+        access_token: Optional[str] = _UNSET,
+        refresh_token: Optional[str] = _UNSET,
         http_client: Optional[httpx.AsyncClient] = None,
         timeout: float = 30.0,
     ):
-        self.client_id = client_id or settings.GOOGLE_DRIVE_CLIENT_ID or os.getenv("GOOGLE_DRIVE_CLIENT_ID")
-        self.client_secret = client_secret or settings.GOOGLE_DRIVE_CLIENT_SECRET or os.getenv("GOOGLE_DRIVE_CLIENT_SECRET")
-        self.redirect_uri = redirect_uri or settings.GOOGLE_DRIVE_REDIRECT_URI or "http://localhost:8000/api/v1/auth/google/callback"
+        self.client_id = (
+            (settings.GOOGLE_DRIVE_CLIENT_ID or os.getenv("GOOGLE_DRIVE_CLIENT_ID"))
+            if client_id is self._UNSET
+            else client_id
+        )
+        self.client_secret = (
+            (settings.GOOGLE_DRIVE_CLIENT_SECRET or os.getenv("GOOGLE_DRIVE_CLIENT_SECRET"))
+            if client_secret is self._UNSET
+            else client_secret
+        )
+        self.redirect_uri = (
+            (settings.GOOGLE_DRIVE_REDIRECT_URI or "http://localhost:8000/api/v1/auth/google/callback")
+            if redirect_uri is self._UNSET
+            else (redirect_uri or "http://localhost:8000/api/v1/auth/google/callback")
+        )
         self.timeout = timeout
 
         self._http_client = http_client
         self._tokens: Optional[OAuthTokens] = None
+        self._state: Optional[str] = None
 
-        init_access = access_token or settings.GOOGLE_DRIVE_ACCESS_TOKEN or os.getenv("GOOGLE_DRIVE_ACCESS_TOKEN")
-        init_refresh = refresh_token or settings.GOOGLE_DRIVE_REFRESH_TOKEN or os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN")
+        init_access = (
+            (settings.GOOGLE_DRIVE_ACCESS_TOKEN or os.getenv("GOOGLE_DRIVE_ACCESS_TOKEN"))
+            if access_token is self._UNSET
+            else access_token
+        )
+        init_refresh = (
+            (settings.GOOGLE_DRIVE_REFRESH_TOKEN or os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"))
+            if refresh_token is self._UNSET
+            else refresh_token
+        )
 
         if init_access:
             self._tokens = OAuthTokens(
@@ -98,27 +122,47 @@ class GoogleDriveClient(BaseDriveClient):
                 refresh_token=init_refresh,
             )
 
+    @property
+    def state(self) -> Optional[str]:
+        """Return the current OAuth state parameter."""
+        return self._state
+
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create shared AsyncClient."""
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(timeout=self.timeout)
         return self._http_client
 
-    def get_authorization_url(self, state: Optional[str] = None, scope: Optional[str] = None) -> str:
+    def get_authorization_url(
+        self,
+        state: Optional[str] = None,
+        scope: Optional[str] = None,
+        response_type: str = "code",
+        access_type: str = "offline",
+        prompt: str = "consent",
+        redirect_uri: Optional[str] = None,
+        **extra_params: Any,
+    ) -> str:
         """Generate Google OAuth 2.0 authorization URL for user consent."""
         if not self.client_id:
             raise DriveAuthenticationError("Cannot generate authorization URL: GOOGLE_DRIVE_CLIENT_ID is not configured.")
 
+        state_value = state or getattr(self, "_state", None) or secrets.token_urlsafe(32)
+        self._state = state_value
+
         params = {
+            "response_type": response_type or "code",
             "client_id": self.client_id,
-            "redirect_uri": self.redirect_uri,
-            "response_type": "code",
+            "redirect_uri": redirect_uri or self.redirect_uri,
             "scope": scope or self.DEFAULT_SCOPE,
-            "access_type": "offline",
-            "prompt": "consent",
+            "access_type": access_type or "offline",
+            "prompt": prompt,
+            "state": state_value,
         }
-        if state:
-            params["state"] = state
+        if extra_params:
+            for k, v in extra_params.items():
+                if v is not None:
+                    params[k] = v
 
         return f"{self.OAUTH_AUTH_URL}?{urlencode(params)}"
 

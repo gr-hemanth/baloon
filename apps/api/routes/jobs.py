@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -6,7 +7,7 @@ from sqlalchemy.orm import Session
 from packages.shared.database import get_db
 from packages.shared.models.job import Job, JobStatus
 from packages.shared.schemas.job import JobCreate, JobResponse, CaptchaSubmit
-from apps.worker.tasks import process_job
+from apps.worker.tasks import process_job, get_job_credentials, store_job_credentials, clear_job_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -16,19 +17,85 @@ router = APIRouter(prefix="/jobs", tags=["Jobs"])
 @router.post("", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
 def create_job(job_in: JobCreate, db: Session = Depends(get_db)):
     """Create a new automation job and dispatch to background worker."""
-    new_job = Job(
-        user_id=job_in.user_id,
-        course_id=job_in.course_id,
-        semester_id=job_in.semester_id,
-        subject_id=job_in.subject_id,
-        worksheet_id=job_in.worksheet_id,
-        transport_mode=job_in.transport_mode or "auto",
-        status=JobStatus.PENDING,
-        current_step="queued",
-    )
-    db.add(new_job)
-    db.commit()
-    db.refresh(new_job)
+    # Prevent duplicate job submissions if an active job exists for this user/course/worksheet
+    if not job_in.force and job_in.user_id:
+        active_statuses = [
+            JobStatus.PENDING,
+            JobStatus.RUNNING,
+            JobStatus.WAITING_FOR_CAPTCHA,
+            JobStatus.DOWNLOADING,
+            JobStatus.PROCESSING,
+            JobStatus.UPLOADING,
+            JobStatus.SUBMITTING,
+            JobStatus.VERIFYING,
+        ]
+        query = db.query(Job).filter(
+            Job.user_id == job_in.user_id,
+            Job.status.in_(active_statuses),
+        )
+        if job_in.course_id:
+            query = query.filter(Job.course_id == job_in.course_id)
+        if job_in.worksheet_id:
+            query = query.filter(Job.worksheet_id == job_in.worksheet_id)
+
+        existing_active = query.first()
+        if existing_active:
+            # Check if this active job is an orphaned/stale job (> 10 minutes with no progress)
+            now = datetime.now(timezone.utc)
+            ref_time = existing_active.updated_at or existing_active.created_at
+            if ref_time.tzinfo is None:
+                ref_time = ref_time.replace(tzinfo=timezone.utc)
+            job_age = (now - ref_time).total_seconds()
+
+            if job_age > 600 and existing_active.status in (JobStatus.PENDING, JobStatus.RUNNING):
+                logger.warning(
+                    "Auto-failing stale orphaned job %s (age: %.1fs, status: %s)",
+                    existing_active.id, job_age, existing_active.status.value
+                )
+                existing_active.status = JobStatus.FAILED
+                existing_active.current_step = "timed_out_orphaned"
+                existing_active.error_message = "Job timed out or orphaned before worker execution"
+                existing_active.updated_at = now
+                db.commit()
+            else:
+                logger.info(
+                    "Duplicate job submission prevented for user %s: active job %s already exists in state %s",
+                    job_in.user_id,
+                    existing_active.id,
+                    existing_active.status.value,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"An active job '{existing_active.id}' is already processing (status: {existing_active.status.value}). Duplicate submission prevented.",
+                    headers={"X-Existing-Job-Id": existing_active.id},
+                )
+
+    try:
+        new_job = Job(
+            user_id=job_in.user_id,
+            course_id=job_in.course_id,
+            semester_id=job_in.semester_id,
+            subject_id=job_in.subject_id,
+            worksheet_id=job_in.worksheet_id,
+            transport_mode=job_in.transport_mode or "auto",
+            status=JobStatus.PENDING,
+            current_step="queued",
+        )
+        db.add(new_job)
+        db.commit()
+        db.refresh(new_job)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.error("Database error creating job: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to persist job record: {exc}",
+        )
+
+    if job_in.credentials:
+        store_job_credentials(new_job.id, job_in.credentials)
 
     # Dispatch to Celery background worker
     try:
@@ -75,13 +142,14 @@ def list_jobs(
     return jobs
 
 
+@router.post("/{job_id}/resume", response_model=JobResponse)
 @router.post("/{job_id}/captcha", response_model=JobResponse)
 def submit_captcha_solution(
     job_id: str,
     captcha_data: CaptchaSubmit,
     db: Session = Depends(get_db)
 ):
-    """Submit CAPTCHA solution when a job is in WAITING_FOR_CAPTCHA state."""
+    """Submit CAPTCHA solution and resume automation when a job is in WAITING_FOR_CAPTCHA state."""
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(
@@ -95,17 +163,54 @@ def submit_captcha_solution(
             detail=f"Job is not waiting for CAPTCHA (current status: {job.status.value})"
         )
 
-    job.captcha_solution = captcha_data.solution
+    sol = captcha_data.effective_solution or captcha_data.solution or captcha_data.captcha_solution
+    if not sol or not sol.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing CAPTCHA solution. Please provide 'solution' or 'captcha_solution'."
+        )
+
+    sol = sol.strip()
+    job.captcha_solution = sol
     job.status = JobStatus.PENDING
     job.current_step = "captcha_submitted_resuming"
     db.commit()
     db.refresh(job)
 
+    cached_creds = get_job_credentials(job.id) or {}
+    if captcha_data.credentials:
+        cached_creds.update(captcha_data.credentials)
+    cached_creds["captcha_solution"] = sol
+    cached_creds["captcha"] = sol
+    store_job_credentials(job.id, cached_creds)
+
     # Re-dispatch job to Celery worker
     try:
-        process_job.delay(job_id=job.id)
+        process_job.delay(job_id=job.id, credentials=cached_creds)
         logger.info("Resumed job %s with user-provided CAPTCHA", job.id)
     except Exception as exc:
         logger.warning("Failed to re-dispatch resumed job to Celery: %s", exc)
 
+    return job
+
+
+@router.post("/{job_id}/cancel", response_model=JobResponse)
+def cancel_job(job_id: str, db: Session = Depends(get_db)):
+    """Safely cancel an active or waiting job and clear ephemeral credentials."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job '{job_id}' not found"
+        )
+
+    job.status = JobStatus.FAILED
+    job.current_step = "cancelled_by_user"
+    job.error_message = "Job cancelled by user"
+    job.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(job)
+
+    clear_job_credentials(job_id)
+    logger.info("Job %s cancelled by user request", job_id)
     return job

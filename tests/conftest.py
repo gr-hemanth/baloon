@@ -26,10 +26,14 @@ TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engin
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_environment():
-    """Configure Celery eager mode during testing."""
+    """Configure Celery eager mode and hermetic offline answer provider during testing."""
     celery_app.conf.task_always_eager = True
     celery_app.conf.task_eager_propagates = False
+    from packages.shared.config import settings
+    orig_provider = settings.WORKSHEET_ANSWER_PROVIDER
+    settings.WORKSHEET_ANSWER_PROVIDER = "rule"
     yield
+    settings.WORKSHEET_ANSWER_PROVIDER = orig_provider
 
 
 @pytest.fixture(scope="function")

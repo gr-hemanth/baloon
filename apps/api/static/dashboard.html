@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SRM eCurricula Automation Platform</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <style>
+    @keyframes pulse-ring {
+      0% { transform: scale(0.95); opacity: 0.8; }
+      50% { transform: scale(1.15); opacity: 0.3; }
+      100% { transform: scale(0.95); opacity: 0.8; }
+    }
+    .pulse-dot {
+      animation: pulse-ring 2s infinite ease-in-out;
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen flex flex-col font-sans">
+
+  <!-- Top Navigation Header -->
+  <header class="border-b border-slate-800 bg-slate-950/80 backdrop-blur sticky top-0 z-40 px-6 py-4 flex flex-wrap items-center justify-between gap-4">
+    <div class="flex items-center space-x-3">
+      <div class="h-10 w-10 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/20">
+        <i class="fa-solid fa-graduation-cap text-lg"></i>
+      </div>
+      <div>
+        <h1 class="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+          SRM eCurricula Automator
+          <span class="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">Production</span>
+        </h1>
+        <p class="text-xs text-slate-400">Direct HTTP Priority • Asynchronous Background Execution</p>
+      </div>
+    </div>
+
+    <!-- Integrations & Status Indicators -->
+    <div class="flex items-center space-x-4 text-xs">
+      <div id="drive-status-badge" class="flex items-center gap-2 px-3 py-1.5 rounded-md bg-slate-800 border border-slate-700">
+        <i class="fa-brands fa-google-drive text-amber-400"></i>
+        <span>Google Drive:</span>
+        <span id="drive-status-text" class="font-semibold text-slate-400">Checking...</span>
+        <button id="drive-connect-btn" onclick="connectGoogleDrive()" class="hidden ml-1 px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white font-medium">Connect</button>
+      </div>
+      <div class="flex items-center gap-2 px-3 py-1.5 rounded-md bg-slate-800 border border-slate-700">
+        <span class="h-2 w-2 rounded-full bg-emerald-400"></span>
+        <span class="text-slate-300">Backend: <strong class="text-white">Active</strong></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Dashboard Container -->
+  <main class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+
+    <!-- Privacy & Security Assurance Banner -->
+    <div class="bg-blue-950/40 border border-blue-800/40 rounded-xl p-4 text-xs text-blue-200 flex items-start gap-3">
+      <i class="fa-solid fa-shield-halved text-blue-400 text-base mt-0.5"></i>
+      <div>
+        <strong class="text-blue-100">Zero-Persistence Security Guarantee:</strong>
+        SRM passwords and OAuth tokens are strictly stored in volatile background worker memory during execution and are <strong class="underline">never saved to the database</strong> or disk. Background Celery workers execute autonomously—you may close this browser once a task is started or CAPTCHA is solved.
+      </div>
+    </div>
+
+    <!-- Grid Layout: Left Controls, Right Status/Deliverables -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+      <!-- Left Column: Controls (Authentication & Discovery) -->
+      <div class="lg:col-span-5 space-y-6">
+
+        <!-- Card 1: Secure SRM Credentials & Discovery -->
+        <div class="bg-slate-950 border border-slate-800 rounded-xl p-5 shadow-xl">
+          <div class="flex items-center justify-between pb-3 mb-4 border-b border-slate-800">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+              <i class="fa-solid fa-key text-blue-500"></i> 1. SRM Authentication
+            </h2>
+            <span class="text-xs text-slate-500">Semester 3 Target</span>
+          </div>
+
+          <form id="srm-auth-form" onsubmit="discoverCourses(event)" class="space-y-4">
+            <div>
+              <label class="block text-xs font-medium text-slate-300 mb-1">Student NetID / Register No.</label>
+              <div class="relative">
+                <span class="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-500">
+                  <i class="fa-solid fa-user text-xs"></i>
+                </span>
+                <input type="text" id="srm-userid" required placeholder="RA2111003010001"
+                  class="w-full bg-slate-900 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition" />
+              </div>
+            </div>
+
+            <div>
+              <label class="block text-xs font-medium text-slate-300 mb-1">Portal Password</label>
+              <div class="relative">
+                <span class="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-500">
+                  <i class="fa-solid fa-lock text-xs"></i>
+                </span>
+                <input type="password" id="srm-password" required placeholder="••••••••••••"
+                  class="w-full bg-slate-900 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition" />
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-slate-300 mb-1">Semester</label>
+                <select id="srm-semester" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500">
+                  <option value="3" selected>Semester 3</option>
+                  <option value="1">Semester 1</option>
+                  <option value="2">Semester 2</option>
+                  <option value="4">Semester 4</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-300 mb-1">Transport</label>
+                <select id="srm-transport" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500">
+                  <option value="auto" selected>Auto (Direct HTTP First)</option>
+                  <option value="http">Strict Direct HTTP</option>
+                  <option value="browser">Headless Chrome Fallback</option>
+                </select>
+              </div>
+            </div>
+
+            <button type="submit" id="discover-btn"
+              class="w-full py-2.5 px-4 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-medium text-sm flex items-center justify-center gap-2 shadow-lg shadow-blue-600/20 transition disabled:opacity-50">
+              <i class="fa-solid fa-magnifying-glass"></i>
+              <span>Discover Semester 3 Worksheets</span>
+            </button>
+          </form>
+
+          <!-- Inline Discovery Message -->
+          <div id="discovery-msg" class="mt-3 text-xs hidden"></div>
+        </div>
+
+        <!-- Card 2: Discovered Courses & Worksheet Selector -->
+        <div id="course-selector-card" class="bg-slate-950 border border-slate-800 rounded-xl p-5 shadow-xl opacity-60 pointer-events-none transition-all">
+          <div class="flex items-center justify-between pb-3 mb-4 border-b border-slate-800">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+              <i class="fa-solid fa-list-check text-emerald-500"></i> 2. Select Course & Worksheet
+            </h2>
+            <span id="courses-count-badge" class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono">0 found</span>
+          </div>
+
+          <div class="space-y-4">
+            <div>
+              <label class="block text-xs font-medium text-slate-300 mb-1">Target Course</label>
+              <select id="course-dropdown" onchange="onCourseSelected()" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
+                <option value="">-- Discover courses first --</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="block text-xs font-medium text-slate-300 mb-1">Available Worksheets</label>
+              <div id="worksheets-container" class="space-y-2 max-h-48 overflow-y-auto pr-1">
+                <p class="text-xs text-slate-500 italic">Select a course to view available worksheets.</p>
+              </div>
+            </div>
+
+            <button type="button" id="start-job-btn" onclick="startAutomationJob()" disabled
+              class="w-full py-2.5 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-medium text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/20 transition disabled:opacity-50 disabled:cursor-not-allowed">
+              <i class="fa-solid fa-play"></i>
+              <span>Start Background Automation</span>
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Right Column: Live Pipeline Status & Deliverables -->
+      <div class="lg:col-span-7 space-y-6">
+
+        <!-- Live Status Tracker Card -->
+        <div class="bg-slate-950 border border-slate-800 rounded-xl p-5 shadow-xl">
+          <div class="flex items-center justify-between pb-3 mb-4 border-b border-slate-800">
+            <div>
+              <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                <i class="fa-solid fa-diagram-project text-blue-500"></i> Live Job Execution Pipeline
+              </h2>
+              <p class="text-xs text-slate-500">10-State Asynchronous Worker Orchestration</p>
+            </div>
+            <div id="job-status-pill" class="px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-slate-800 text-slate-400">
+              IDLE
+            </div>
+          </div>
+
+          <!-- Job Active Meta -->
+          <div id="job-active-meta" class="mb-5 p-3 rounded-lg bg-slate-900/80 border border-slate-800 text-xs flex flex-wrap items-center justify-between gap-2 text-slate-400">
+            <div>Job ID: <span id="meta-job-id" class="font-mono text-slate-200">None active</span></div>
+            <div>Current Step: <span id="meta-job-step" class="text-blue-400 font-medium">Waiting to start</span></div>
+            <button id="dismiss-job-btn" type="button" onclick="dismissActiveJob()" class="text-[11px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white border border-slate-700 transition hidden">
+              <i class="fa-solid fa-xmark"></i> Clear / New
+            </button>
+          </div>
+
+          <!-- 10-State Visual Stepper -->
+          <div class="relative border-l-2 border-slate-800 ml-4 pl-6 space-y-4 py-1" id="pipeline-stepper">
+            <!-- 1. PENDING -->
+            <div class="step-item relative" data-step="PENDING">
+              <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
+              <div class="font-semibold text-xs text-slate-400 step-title">1. PENDING</div>
+              <div class="text-[11px] text-slate-500">Job received and enqueued in Celery broker</div>
+            </div>
+
+            <!-- 2. RUNNING -->
+            <div class="step-item relative" data-step="RUNNING">
+              <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
+              <div class="font-semibold text-xs text-slate-400 step-title">2. RUNNING</div>
+              <div class="text-[11px] text-slate-500">Worker initialized, authenticating with portal</div>
+            </div>
+
+            <!-- 3. WAITING_FOR_CAPTCHA -->
+            <div class="step-item relative" data-step="WAITING_FOR_CAPTCHA">
+              <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
+              <div class="font-semibold text-xs text-slate-400 step-title">3. WAITING_FOR_CAPTCHA (Pause/Resume)</div>
+              <div class="text-[11px] text-slate-500">Paused if portal prompts CAPTCHA challenge</div>
+            </div>
+
+            <!-- 4. DOWNLOADING -->
+            <div class="step-item relative" data-step="DOWNLOADING">
+              <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
+              <div class="font-semibold text-xs text-slate-400 step-title">4. DOWNLOADING</div>
+              <div class="text-[11px] text-slate-500">Fetching original worksheet document to isolated directory</div>
+            </div>
+
+            <!-- 5. PROCESSING -->
+            <div class="step-item relative" data-step="PROCESSING">
+              <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
+              <div class="font-semibold text-xs text-slate-400 step-title">5. PROCESSING</div>
+              <div class="text-[11px] text-slate-500">Parsing questions, generating answers via FreeLLMAPI, creating separate completed file</div>
+            </div>
+
+            <!-- 6. UPLOADING -->
+            <div class="step-item relative" data-step="UPLOADING">
+              <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
+              <div class="font-semibold text-xs text-slate-400 step-title">6. UPLOADING</div>
+              <div class="text-[11px] text-slate-500">Storing completed copy in Google Drive with 'Anyone with link / Viewer' permissions</div>
+            </div>
+
+            <!-- 7. SUBMITTING -->
+            <div class="step-item relative" data-step="SUBMITTING">
+              <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
+              <div class="font-semibold text-xs text-slate-400 step-title">7. SUBMITTING</div>
+              <div class="text-[11px] text-slate-500">Submitting verified public link to SRM portal via direct HTTP POST</div>
+            </div>
+
+            <!-- 8. VERIFYING -->
+            <div class="step-item relative" data-step="VERIFYING">
+              <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
+              <div class="font-semibold text-xs text-slate-400 step-title">8. VERIFYING</div>
+              <div class="text-[11px] text-slate-500">Confirming practice status update on portal before marking complete</div>
+            </div>
+
+            <!-- 9. COMPLETED -->
+            <div class="step-item relative" data-step="COMPLETED">
+              <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
+              <div class="font-semibold text-xs text-slate-400 step-title">9. COMPLETED</div>
+              <div class="text-[11px] text-slate-500">Workflow finished successfully; deliverables ready</div>
+            </div>
+          </div>
+
+          <!-- Error Alert View -->
+          <div id="error-alert" class="mt-4 p-4 rounded-lg bg-red-950/50 border border-red-800 text-red-200 text-xs hidden flex items-start gap-2">
+            <i class="fa-solid fa-circle-exclamation text-red-400 text-sm mt-0.5"></i>
+            <div>
+              <strong class="text-red-100">Job Error:</strong>
+              <div id="error-alert-msg" class="mt-1 font-mono break-all"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Deliverables / Completion Result Card -->
+        <div id="deliverables-card" class="bg-slate-950 border border-slate-800 rounded-xl p-5 shadow-xl hidden">
+          <div class="flex items-center justify-between pb-3 mb-4 border-b border-slate-800">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-emerald-400 flex items-center gap-2">
+              <i class="fa-solid fa-circle-check"></i> Verification Confirmed & Deliverables Ready
+            </h2>
+            <span class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-bold">VERIFIED</span>
+          </div>
+
+          <div class="space-y-4 text-xs">
+            <div class="p-4 rounded-lg bg-emerald-950/20 border border-emerald-800/40 space-y-2">
+              <div class="flex items-center justify-between">
+                <span class="text-slate-400 font-medium">Public Google Drive Shareable Link:</span>
+                <span class="px-2 py-0.5 rounded bg-emerald-900/60 text-emerald-300 font-mono text-[10px]">VERIFIED_PUBLIC_READER</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <input type="text" id="result-drive-link" readonly
+                  class="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-slate-200 font-mono text-xs select-all" />
+                <a id="result-drive-btn" href="#" target="_blank"
+                  class="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center gap-1.5 whitespace-nowrap">
+                  <span>Open Drive</span>
+                  <i class="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>
+                </a>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-slate-300">
+              <div class="p-2.5 rounded bg-slate-900 border border-slate-800">
+                <div class="text-slate-500 text-[10px]">Original Document</div>
+                <div id="res-orig-file" class="font-semibold truncate">--</div>
+              </div>
+              <div class="p-2.5 rounded bg-slate-900 border border-slate-800">
+                <div class="text-slate-500 text-[10px]">Completed Copy</div>
+                <div id="res-comp-file" class="font-semibold text-emerald-400 truncate">--</div>
+              </div>
+              <div class="p-2.5 rounded bg-slate-900 border border-slate-800">
+                <div class="text-slate-500 text-[10px]">Questions Answered</div>
+                <div id="res-q-count" class="font-semibold text-white">--</div>
+              </div>
+              <div class="p-2.5 rounded bg-slate-900 border border-slate-800">
+                <div class="text-slate-500 text-[10px]">Portal Status</div>
+                <div id="res-portal-status" class="font-semibold text-emerald-400">Practice Submitted (2)</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- Interactive CAPTCHA Resolution Modal -->
+  <div id="captcha-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 hidden">
+    <div class="bg-slate-900 border border-amber-600/50 rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4">
+      <div class="flex items-center gap-3 text-amber-400">
+        <i class="fa-solid fa-triangle-exclamation text-2xl"></i>
+        <div>
+          <h3 class="font-bold text-white text-base">CAPTCHA Challenge Required</h3>
+          <p class="text-xs text-slate-400">The SRM portal requires human CAPTCHA verification to proceed.</p>
+        </div>
+      </div>
+
+      <!-- CAPTCHA Image Container -->
+      <div class="bg-slate-950 p-4 rounded-lg border border-slate-800 flex flex-col items-center justify-center gap-2">
+        <div id="captcha-image-wrapper" class="h-16 flex items-center justify-center">
+          <img id="captcha-image" src="" alt="CAPTCHA Challenge" class="h-12 border border-slate-700 rounded bg-white px-2 hidden" />
+          <div id="captcha-canvas-placeholder" class="text-xs text-slate-400 text-center italic">
+            Visual challenge captured from portal canvas
+          </div>
+        </div>
+        <p class="text-[11px] text-slate-500">Enter the characters exactly as shown above.</p>
+      </div>
+
+      <!-- Solution Form -->
+      <form onsubmit="submitCaptchaSolution(event)" class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-slate-300 mb-1">CAPTCHA Solution</label>
+          <input type="text" id="captcha-solution-input" required autocomplete="off" placeholder="e.g. 48B92"
+            class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-center tracking-widest font-mono text-white placeholder-slate-600 focus:outline-none focus:border-amber-500 uppercase" />
+        </div>
+
+        <div class="flex items-center justify-end gap-2 pt-2">
+          <button type="submit" id="captcha-submit-btn"
+            class="w-full py-2.5 px-4 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-sm flex items-center justify-center gap-2 shadow-lg shadow-amber-600/20 transition">
+            <i class="fa-solid fa-check"></i>
+            <span>Submit Solution & Resume Job</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Client-Side Dashboard Script -->
+  <script>
+    let activeJobId = null;
+    let pollInterval = null;
+    let discoveredCourses = [];
+    let selectedWorksheetData = null;
+
+    // Check Google Drive connection status on load
+    async function checkDriveStatus() {
+      try {
+        const res = await fetch("/api/v1/auth/google/status");
+        if (res.ok) {
+          const data = await res.json();
+          const textEl = document.getElementById("drive-status-text");
+          const btnEl = document.getElementById("drive-connect-btn");
+          if (data.connected) {
+            textEl.textContent = "Authorized";
+            textEl.className = "font-semibold text-emerald-400";
+            btnEl.classList.add("hidden");
+          } else {
+            textEl.textContent = "Not Connected";
+            textEl.className = "font-semibold text-amber-400";
+            btnEl.classList.remove("hidden");
+          }
+        }
+      } catch (e) {
+        console.warn("Could not probe Google Drive status:", e);
+      }
+    }
+
+    async function connectGoogleDrive() {
+      try {
+        const res = await fetch("/api/v1/auth/google/url");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.authorization_url) {
+            window.open(data.authorization_url, "GoogleDriveAuth", "width=600,height=700");
+          }
+        }
+      } catch (e) {
+        alert("Failed to initiate Google Drive OAuth: " + e.message);
+      }
+    }
+
+    window.addEventListener("message", (event) => {
+      if (event.data && event.data.type === "GOOGLE_DRIVE_CONNECTED") {
+        checkDriveStatus();
+      }
+    });
+
+    // Step 1: Discover Courses
+    async function discoverCourses(e) {
+      e.preventDefault();
+      const userId = document.getElementById("srm-userid").value.trim();
+      const password = document.getElementById("srm-password").value;
+      const semester = parseInt(document.getElementById("srm-semester").value) || 3;
+      const transportEl = document.getElementById("srm-transport");
+      const transportMode = transportEl ? transportEl.value : "auto";
+
+      const btn = document.getElementById("discover-btn");
+      const msg = document.getElementById("discovery-msg");
+      btn.disabled = true;
+      btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Authenticating & Discovering...`;
+      msg.classList.add("hidden");
+
+      try {
+        const res = await fetch("/api/v1/srm/discover", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: userId, password: password, semester: semester, transport_mode: transportMode }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || "Authentication / Discovery failed");
+        }
+
+        if (data.status === "WAITING_FOR_CAPTCHA") {
+          showCaptchaModal(data.captcha_challenge, (sol) => {
+            hideCaptchaModal();
+            // Re-run discovery with captcha solution
+            fetch("/api/v1/srm/discover", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ user_id: userId, password: password, semester: semester, transport_mode: transportMode, captcha_solution: sol }),
+            }).then(r => r.json()).then(res => {
+              hideCaptchaModal();
+              handleDiscoverySuccess(res);
+            }).catch(err => {
+              hideCaptchaModal();
+              msg.textContent = "Error: " + err.message;
+              msg.className = "mt-3 text-xs text-red-400";
+              msg.classList.remove("hidden");
+            });
+          });
+          return;
+        }
+
+        handleDiscoverySuccess(data);
+
+      } catch (err) {
+        msg.textContent = "Discovery failed: " + err.message;
+        msg.className = "mt-3 text-xs text-red-400";
+        msg.classList.remove("hidden");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<i class="fa-solid fa-magnifying-glass"></i> Discover Semester 3 Worksheets`;
+      }
+    }
+
+    function handleDiscoverySuccess(data) {
+      discoveredCourses = data.courses || [];
+      const msg = document.getElementById("discovery-msg");
+      msg.textContent = `Discovered ${discoveredCourses.length} Semester 3 courses!`;
+      msg.className = "mt-3 text-xs text-emerald-400";
+      msg.classList.remove("hidden");
+
+      // Populate Courses Dropdown
+      const dropdown = document.getElementById("course-dropdown");
+      dropdown.innerHTML = '<option value="">-- Select a course --</option>';
+      discoveredCourses.forEach(c => {
+        const opt = document.createElement("option");
+        opt.value = c.course_code;
+        opt.textContent = `${c.course_code} - ${c.course_name} (${c.worksheets.length} worksheets)`;
+        dropdown.appendChild(opt);
+      });
+
+      document.getElementById("courses-count-badge").textContent = `${discoveredCourses.length} found`;
+      const card = document.getElementById("course-selector-card");
+      card.classList.remove("opacity-60", "pointer-events-none");
+    }
+
+    function onCourseSelected() {
+      const code = document.getElementById("course-dropdown").value;
+      const course = discoveredCourses.find(c => c.course_code === code);
+      const container = document.getElementById("worksheets-container");
+      container.innerHTML = "";
+      selectedWorksheetData = null;
+      document.getElementById("start-job-btn").disabled = true;
+
+      if (!course || !course.worksheets || course.worksheets.length === 0) {
+        container.innerHTML = `<p class="text-xs text-slate-500 italic">No available DOCX worksheets found for this course.</p>`;
+        return;
+      }
+
+      course.worksheets.forEach((ws, idx) => {
+        const div = document.createElement("div");
+        div.className = "flex items-center justify-between p-2.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-slate-700 transition cursor-pointer text-xs";
+        
+        const isVer = ws.submission_status === "VERIFIED";
+        const badgeColor = isVer ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" : "bg-blue-500/10 text-blue-400 border-blue-500/20";
+        
+        div.innerHTML = `
+          <div class="flex items-center gap-2.5">
+            <input type="radio" name="selected_ws" value="${ws.session}${ws.slo}" id="ws_${idx}" class="text-emerald-600 focus:ring-0" />
+            <div>
+              <div class="font-medium text-white">${ws.title || `Session ${ws.session} SLO ${ws.slo}`}</div>
+              <div class="text-[10px] text-slate-500 font-mono">${ws.filename}</div>
+            </div>
+          </div>
+          <span class="px-2 py-0.5 rounded text-[10px] border ${badgeColor}">${ws.submission_status}</span>
+        `;
+
+        div.onclick = () => {
+          div.querySelector("input").checked = true;
+          selectedWorksheetData = { ...ws, course_code: course.course_code };
+          document.getElementById("start-job-btn").disabled = false;
+        };
+
+        container.appendChild(div);
+      });
+    }
+
+    // Step 2: Start Job
+    async function startAutomationJob() {
+      const userId = document.getElementById("srm-userid").value.trim();
+      const password = document.getElementById("srm-password").value;
+      const semester = document.getElementById("srm-semester").value;
+      const transport = document.getElementById("srm-transport").value;
+      const courseCode = document.getElementById("course-dropdown").value;
+      const wsId = selectedWorksheetData ? `${selectedWorksheetData.session}${selectedWorksheetData.slo}` : null;
+
+      const btn = document.getElementById("start-job-btn");
+      btn.disabled = true;
+      btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Dispatching Background Job...`;
+
+      try {
+        const payload = {
+          user_id: userId,
+          course_id: courseCode,
+          semester_id: semester,
+          worksheet_id: wsId,
+          transport_mode: transport,
+          credentials: { USER_ID: userId, PASSWORD: password },
+        };
+
+        const res = await fetch("/api/v1/jobs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (res.status === 409) {
+          let errData;
+          try {
+            errData = await res.json();
+          } catch {
+            errData = { detail: await res.text() };
+          }
+          const detailMsg = typeof errData.detail === "object" ? errData.detail.message : errData.detail;
+          const existingId = (typeof errData.detail === "object" && errData.detail.existing_job_id) ||
+                             errData.existing_job_id ||
+                             res.headers.get("X-Existing-Job-Id") ||
+                             (typeof detailMsg === "string" && (detailMsg.match(/job '([^']+)'/) || [])[1]);
+          alert("Notice: " + (detailMsg || "An active job is already processing"));
+          if (existingId) {
+            trackJob(existingId);
+          }
+          return;
+        }
+
+        if (!res.ok) {
+          let errMsg = "Failed to create job";
+          try {
+            const err = await res.json();
+            errMsg = err.detail || errMsg;
+          } catch {
+            const txt = await res.text();
+            if (txt) errMsg = txt;
+          }
+          throw new Error(errMsg);
+        }
+
+        const job = await res.json();
+        trackJob(job.id);
+
+      } catch (e) {
+        alert("Error creating job: " + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<i class="fa-solid fa-play"></i> Start Background Automation`;
+      }
+    }
+
+    // Step 3: Track Live Status
+    function trackJob(jobId) {
+      if (!jobId) return;
+      activeJobId = jobId;
+      try {
+        localStorage.setItem("srm_active_job_id", jobId);
+      } catch (e) {}
+      document.getElementById("meta-job-id").textContent = jobId;
+      document.getElementById("dismiss-job-btn").classList.remove("hidden");
+      document.getElementById("error-alert").classList.add("hidden");
+      document.getElementById("deliverables-card").classList.add("hidden");
+
+      if (pollInterval) clearInterval(pollInterval);
+      pollInterval = setInterval(() => pollJobStatus(jobId), 1500);
+      pollJobStatus(jobId);
+    }
+
+    async function pollJobStatus(jobId) {
+      try {
+        const res = await fetch(`/api/v1/jobs/${jobId}`);
+        if (!res.ok) return;
+        const job = await res.json();
+
+        updateStepperUI(job.status, job.current_step);
+
+        if (job.status === "WAITING_FOR_CAPTCHA") {
+          if (!isSubmittingCaptcha) {
+            showCaptchaModal(job.captcha_challenge, async (sol) => {
+              hideCaptchaModal();
+              try {
+                let resumeRes = await fetch(`/api/v1/jobs/${jobId}/resume`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ solution: sol }),
+                });
+                if (!resumeRes.ok) {
+                  resumeRes = await fetch(`/api/v1/jobs/${jobId}/captcha`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ solution: sol }),
+                  });
+                }
+                hideCaptchaModal();
+                await pollJobStatus(jobId);
+              } catch (submitErr) {
+                alert("Failed to submit CAPTCHA solution: " + submitErr.message);
+              }
+            });
+          }
+        } else {
+          hideCaptchaModal();
+        }
+
+        if (job.status === "COMPLETED") {
+          clearInterval(pollInterval);
+          hideCaptchaModal();
+          try { localStorage.removeItem("srm_active_job_id"); } catch (e) {}
+          showDeliverables(job.result);
+        } else if (job.status === "FAILED") {
+          clearInterval(pollInterval);
+          hideCaptchaModal();
+          try { localStorage.removeItem("srm_active_job_id"); } catch (e) {}
+          showErrorAlert(job.error_message);
+        }
+      } catch (err) {
+        console.warn("Poll failed:", err);
+      }
+    }
+
+    const STATE_ORDER = [
+      "PENDING",
+      "RUNNING",
+      "WAITING_FOR_CAPTCHA",
+      "DOWNLOADING",
+      "PROCESSING",
+      "UPLOADING",
+      "SUBMITTING",
+      "VERIFYING",
+      "COMPLETED"
+    ];
+
+    function updateStepperUI(currentStatus, currentStep) {
+      const pill = document.getElementById("job-status-pill");
+      pill.textContent = currentStatus;
+      document.getElementById("meta-job-step").textContent = currentStep || currentStatus;
+
+      // Status pill coloring
+      if (currentStatus === "COMPLETED") {
+        pill.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+      } else if (currentStatus === "FAILED") {
+        pill.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-red-500/10 text-red-400 border border-red-500/20";
+      } else if (currentStatus === "WAITING_FOR_CAPTCHA") {
+        pill.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-amber-500/10 text-amber-400 border border-amber-500/20 pulse-dot";
+      } else {
+        pill.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-blue-500/10 text-blue-400 border border-blue-500/20";
+      }
+
+      const activeIdx = STATE_ORDER.indexOf(currentStatus);
+
+      document.querySelectorAll(".step-item").forEach(el => {
+        const stepName = el.getAttribute("data-step");
+        const idx = STATE_ORDER.indexOf(stepName);
+        const dot = el.querySelector(".step-dot");
+        const title = el.querySelector(".step-title");
+
+        if (currentStatus === "FAILED") {
+          if (idx <= activeIdx) {
+            dot.className = "step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-red-600 border-2 border-red-400";
+            title.className = "font-semibold text-xs text-red-400 step-title";
+          }
+        } else if (idx < activeIdx) {
+          // Completed step
+          dot.className = "step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-emerald-500 border-2 border-emerald-400";
+          title.className = "font-semibold text-xs text-emerald-400 step-title";
+        } else if (idx === activeIdx) {
+          // Active step
+          dot.className = "step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-blue-500 border-2 border-white pulse-dot";
+          title.className = "font-semibold text-xs text-blue-300 step-title";
+        } else {
+          // Future step
+          dot.className = "step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700";
+          title.className = "font-semibold text-xs text-slate-500 step-title";
+        }
+      });
+    }
+
+    function showDeliverables(result) {
+      hideCaptchaModal();
+      if (!result) return;
+      document.getElementById("deliverables-card").classList.remove("hidden");
+      document.getElementById("result-drive-link").value = result.drive_web_url || "";
+      document.getElementById("result-drive-btn").href = result.drive_web_url || "#";
+      document.getElementById("res-orig-file").textContent = result.original_file || "--";
+      document.getElementById("res-comp-file").textContent = result.completed_file || "--";
+      document.getElementById("res-q-count").textContent = result.questions_count ?? "Verified";
+    }
+
+    function showErrorAlert(msg) {
+      hideCaptchaModal();
+      document.getElementById("error-alert-msg").textContent = msg || "An unexpected error occurred during execution.";
+      document.getElementById("error-alert").classList.remove("hidden");
+    }
+
+    // CAPTCHA Modal
+    let captchaResolver = null;
+    let isSubmittingCaptcha = false;
+
+    function showCaptchaModal(challenge, resolver) {
+      if (isSubmittingCaptcha) return;
+      captchaResolver = resolver;
+      const modal = document.getElementById("captcha-modal");
+      const img = document.getElementById("captcha-image");
+      const ph = document.getElementById("captcha-canvas-placeholder");
+      const input = document.getElementById("captcha-solution-input");
+
+      let b64 = null;
+      if (challenge) {
+        if (typeof challenge === "string") {
+          try {
+            const parsed = JSON.parse(challenge);
+            b64 = parsed.image_base64 || challenge;
+          } catch {
+            b64 = challenge;
+          }
+        } else if (challenge.image_base64) {
+          b64 = challenge.image_base64;
+        }
+      }
+
+      if (b64 && b64.length > 50) {
+        img.src = b64.startsWith("data:") ? b64 : `data:image/png;base64,${b64}`;
+        img.classList.remove("hidden");
+        ph.classList.add("hidden");
+      } else {
+        img.classList.add("hidden");
+        ph.classList.remove("hidden");
+      }
+
+      const isAlreadyVisible = modal.style.display === "flex" || (!modal.classList.contains("hidden") && modal.style.display !== "none");
+      modal.classList.remove("hidden");
+      modal.style.display = "flex";
+
+      if (!isAlreadyVisible) {
+        input.value = "";
+        setTimeout(() => input.focus(), 50);
+      }
+    }
+
+    function hideCaptchaModal() {
+      const modal = document.getElementById("captcha-modal");
+      if (modal) {
+        modal.classList.add("hidden");
+        modal.style.display = "none";
+      }
+    }
+
+    async function submitCaptchaSolution(e) {
+      e.preventDefault();
+      const input = document.getElementById("captcha-solution-input");
+      const btn = document.getElementById("captcha-submit-btn");
+      const sol = input.value.trim();
+      if (!sol || isSubmittingCaptcha) return;
+
+      isSubmittingCaptcha = true;
+      hideCaptchaModal();
+
+      btn.disabled = true;
+      btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Submitting Solution...`;
+      try {
+        if (captchaResolver) {
+          await captchaResolver(sol);
+        }
+      } catch (err) {
+        alert("Failed to submit CAPTCHA: " + err.message);
+        showCaptchaModal(null, captchaResolver);
+      } finally {
+        isSubmittingCaptcha = false;
+        btn.disabled = false;
+        btn.innerHTML = `<i class="fa-solid fa-check"></i> <span>Submit Solution & Resume Job</span>`;
+      }
+    }
+
+    // Dismiss / Reset Active Job Tracker
+    function dismissActiveJob() {
+      if (pollInterval) clearInterval(pollInterval);
+      pollInterval = null;
+      activeJobId = null;
+      try {
+        localStorage.removeItem("srm_active_job_id");
+      } catch (e) {}
+      hideCaptchaModal();
+      document.getElementById("meta-job-id").textContent = "None active";
+      document.getElementById("meta-job-step").textContent = "Idle";
+      const pill = document.getElementById("job-status-pill");
+      pill.textContent = "IDLE";
+      pill.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-slate-800 text-slate-400";
+      document.getElementById("dismiss-job-btn").classList.add("hidden");
+      document.getElementById("error-alert").classList.add("hidden");
+      document.getElementById("deliverables-card").classList.add("hidden");
+      document.querySelectorAll(".step-item").forEach(el => {
+        const dot = el.querySelector(".step-dot");
+        const title = el.querySelector(".step-title");
+        if (dot) dot.className = "step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition";
+        if (title) title.className = "font-semibold text-xs text-slate-400 step-title";
+      });
+    }
+
+    // Helper to determine if a job is genuinely active (not an orphaned/stale job)
+    function isGenuinelyActive(job) {
+      if (!job || !job.status) return false;
+      if (job.status === "WAITING_FOR_CAPTCHA" || job.status === "RUNNING") return true;
+      if (job.status === "PENDING") {
+        if (!job.created_at) return false;
+        const ageMs = Date.now() - new Date(job.created_at).getTime();
+        return ageMs >= 0 && ageMs < 180000; // Only consider PENDING active if created in the last 3 minutes
+      }
+      return false;
+    }
+
+    // Auto-detect and attach to active background job on page load
+    async function checkActiveJobOnLoad() {
+      let candidateId = null;
+      try {
+        candidateId = localStorage.getItem("srm_active_job_id");
+      } catch (e) {}
+
+      if (candidateId) {
+        try {
+          const res = await fetch(`/api/v1/jobs/${candidateId}`);
+          if (res.ok) {
+            const job = await res.json();
+            if (isGenuinelyActive(job)) {
+              trackJob(candidateId);
+              return;
+            } else {
+              try { localStorage.removeItem("srm_active_job_id"); } catch (e) {}
+            }
+          } else {
+            try { localStorage.removeItem("srm_active_job_id"); } catch (e) {}
+          }
+        } catch (e) {
+          console.warn("Could not check saved active job:", e);
+        }
+      }
+
+      // Check recent jobs from backend to auto-attach if any genuinely active job exists
+      try {
+        const res = await fetch("/api/v1/jobs?limit=5");
+        if (res.ok) {
+          const jobs = await res.json();
+          const active = jobs.find(isGenuinelyActive);
+          if (active) {
+            trackJob(active.id);
+          }
+        }
+      } catch (e) {
+        console.warn("Could not query active jobs:", e);
+      }
+    }
+
+    // Initial check on page load
+    checkDriveStatus();
+    checkActiveJobOnLoad();
+  </script>
+</body>
+</html>
