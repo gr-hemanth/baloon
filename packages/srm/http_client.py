@@ -1,9 +1,11 @@
 import asyncio
 import logging
+import re
 import tempfile
 import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
+from urllib.parse import urlparse, parse_qsl, urlencode
 import httpx
 
 from packages.srm.client import SRMClient
@@ -31,6 +33,80 @@ from packages.srm.exceptions import (
 from packages.shared.config import settings
 
 logger = logging.getLogger("srm_http_client")
+
+
+def extract_link_str(val: Any) -> Optional[str]:
+    """Extract URL string from a string or dictionary representation."""
+    if isinstance(val, dict):
+        return (
+            val.get("view")
+            or val.get("download")
+            or val.get("link")
+            or val.get("url")
+            or next((v for v in val.values() if isinstance(v, str) and v.startswith("http")), None)
+        )
+    elif isinstance(val, str):
+        cleaned = val.strip()
+        return cleaned if cleaned else None
+    return None
+
+
+def extract_google_drive_file_id(url_or_obj: Any) -> Optional[str]:
+    """Extract Google Drive file ID from any standard Google Drive or Docs URL or container."""
+    url = extract_link_str(url_or_obj)
+    if not url:
+        return None
+
+    # Pattern 1: /document/d/<id>, /file/d/<id>, /spreadsheets/d/<id>, /presentation/d/<id>
+    m = re.search(r"/(?:document|file|spreadsheets|presentation)/d/([a-zA-Z0-9_-]{20,})", url)
+    if m:
+        return m.group(1)
+
+    # Pattern 2: id=<file_id> (e.g. drive.google.com/open?id=... or /uc?id=...)
+    m = re.search(r"[?&]id=([a-zA-Z0-9_-]{20,})", url)
+    if m:
+        return m.group(1)
+
+    # Pattern 3: Generic /d/<file_id>
+    m = re.search(r"/d/([a-zA-Z0-9_-]{20,})", url)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def canonicalize_submission_url(url_or_obj: Any) -> Optional[str]:
+    """Canonicalize a submission URL for secure, semantic verification.
+
+    Normalizes Google Drive and Docs URLs to their canonical file view URL
+    (https://drive.google.com/file/d/{file_id}/view) while preserving exact file ID
+    integrity, avoiding false mismatches caused by portal query string stripping,
+    /edit vs /view endpoints, or JSON dictionary wrapping.
+    """
+    url_str = extract_link_str(url_or_obj)
+    if not url_str:
+        return None
+
+    drive_id = extract_google_drive_file_id(url_str)
+    if drive_id:
+        return f"https://drive.google.com/file/d/{drive_id}/view"
+
+    try:
+        parsed = urlparse(url_str)
+        if not parsed.scheme or not parsed.netloc:
+            return url_str.rstrip("/")
+        scheme = parsed.scheme.lower()
+        netloc = parsed.netloc.lower()
+        path = parsed.path.rstrip("/")
+        query_pairs = parse_qsl(parsed.query)
+        filtered = [
+            (k, v) for k, v in query_pairs
+            if k.lower() not in ("usp", "ouid", "rtpof", "sd", "authuser", "utm_source", "utm_medium")
+        ]
+        q = urlencode(filtered)
+        return f"{scheme}://{netloc}{path}" + (f"?{q}" if q else "")
+    except Exception:
+        return url_str.rstrip("/")
 
 
 class SRMHttpClient(SRMClient):
@@ -730,6 +806,9 @@ class SRMHttpClient(SRMClient):
         """Verify worksheet link is reflected in session status.
         
         Does not assume successful submit response guarantees verification.
+        Performs semantic canonical URL matching to safely accommodate SRM URL normalizations
+        (e.g., stripping query parameters, switching /edit to /view, wrapping inside {"view": ...})
+        while strictly enforcing identical Google Drive file ID integrity.
         """
         if not course_info:
             return True
@@ -740,22 +819,67 @@ class SRMHttpClient(SRMClient):
             session = 1
 
         status_obj = await self.get_session_status(course_info=course_info, session=session)
-        key = f"{session}{slo}"
-        recorded_link = status_obj.slo_links.get(key)
-        practice_val = status_obj.practice_status.get(key) or status_obj.practice_status.get(str(session))
+        key_full = f"{session}{slo}"
+        key_short = f"{session % 100}{slo}" if session >= 100 else key_full
+        key_sess = str(session)
 
-        if expected_link and recorded_link != expected_link:
-            raise VerificationFailed(
-                f"Verification failed: recorded link does not match submitted link for session {key}"
-            )
+        candidate_keys = [
+            key_full,
+            key_short,
+            key_sess,
+            int(key_full) if key_full.isdigit() else None,
+            int(key_short) if key_short.isdigit() else None,
+            session,
+        ]
+        candidate_keys = [k for k in candidate_keys if k is not None]
+
+        recorded_raw = None
+        if isinstance(status_obj.slo_links, dict):
+            for k in candidate_keys:
+                if k in status_obj.slo_links and status_obj.slo_links[k]:
+                    recorded_raw = status_obj.slo_links[k]
+                    break
+
+        practice_val = None
+        if isinstance(status_obj.practice_status, dict):
+            for k in candidate_keys:
+                if k in status_obj.practice_status and status_obj.practice_status[k] is not None:
+                    practice_val = status_obj.practice_status[k]
+                    break
+        elif isinstance(status_obj.practice_status, int):
+            practice_val = status_obj.practice_status
+
+        if expected_link:
+            canonical_expected = canonicalize_submission_url(expected_link)
+            canonical_recorded = canonicalize_submission_url(recorded_raw) if recorded_raw else None
+
+            if not canonical_recorded:
+                avail_keys = (
+                    list(status_obj.slo_links.keys())
+                    if isinstance(status_obj.slo_links, dict)
+                    else status_obj.slo_links
+                )
+                raise VerificationFailed(
+                    f"Verification failed: no recorded link found on SRM for session {key_full} "
+                    f"(practice_status={practice_val}, available_keys={avail_keys})"
+                )
+
+            if canonical_recorded != canonical_expected:
+                raise VerificationFailed(
+                    f"Verification failed: recorded link does not match submitted link for session {key_full}. "
+                    f"Expected canonical: {canonical_expected}, Recorded canonical: {canonical_recorded}"
+                )
 
         if practice_val not in (1, 2):
             logger.warning(
                 "Worksheet status for session %s is %s (expected 1=Pending or 2=Verified)",
-                key, practice_val
+                key_full, practice_val
             )
 
-        logger.info("Verification confirmed for session %s", key)
+        logger.info(
+            "Verification confirmed for session %s (practice_status=%s)",
+            key_full, practice_val
+        )
         return True
 
     async def close(self) -> None:

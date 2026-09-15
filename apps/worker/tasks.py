@@ -378,17 +378,42 @@ async def _run_job_workflow(
                 session=session_num,
             )
 
-            # Idempotency check: skip submission if practice_status is already 2 (submitted/verified)
+            # Idempotency check: skip submission if link already recorded or practice_status is 2 (verified)
             already_submitted = False
             if session_status:
                 practice_val = None
+                key_full = f"{session_num}{slo_num}"
+                key_short = f"{session_num % 100}{slo_num}" if session_num >= 100 else key_full
+                cand_keys = [key_full, key_short, str(session_num)]
+                if key_full.isdigit():
+                    cand_keys.append(int(key_full))
+
                 if isinstance(session_status.practice_status, dict):
-                    practice_val = session_status.practice_status.get(f"{session_num}{slo_num}") or session_status.practice_status.get(str(session_num))
+                    for k in cand_keys:
+                        if k in session_status.practice_status:
+                            practice_val = session_status.practice_status[k]
+                            break
                 elif isinstance(session_status.practice_status, int):
                     practice_val = session_status.practice_status
-                if practice_val == 2:
-                    already_submitted = True
-                    logger.info("Session %s is already marked submitted on SRM (practice_status=2)", session_num)
+
+                if practice_val in (1, 2):
+                    rec_link = None
+                    if isinstance(session_status.slo_links, dict):
+                        for k in cand_keys:
+                            if k in session_status.slo_links and session_status.slo_links[k]:
+                                rec_link = session_status.slo_links[k]
+                                break
+                    from packages.srm.http_client import canonicalize_submission_url
+                    if rec_link and drive_web_url:
+                        if canonicalize_submission_url(rec_link) == canonicalize_submission_url(drive_web_url):
+                            already_submitted = True
+                            logger.info(
+                                "Session %s is already submitted with matching link on SRM (practice_status=%s)",
+                                session_num, practice_val
+                            )
+                    elif practice_val == 2:
+                        already_submitted = True
+                        logger.info("Session %s is already marked verified on SRM (practice_status=2)", session_num)
 
             if not already_submitted:
                 user_id = (credentials or {}).get("USER_ID") or (credentials or {}).get("username") or job.user_id or ""
