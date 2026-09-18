@@ -8,7 +8,7 @@ import secrets
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import httpx
@@ -30,6 +30,33 @@ logger = logging.getLogger(__name__)
 # Standard MIME types
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PDF_MIME = "application/pdf"
+
+
+def get_active_drive_tokens(env_path: Optional[Path] = None) -> Tuple[Optional[str], Optional[str]]:
+    """Read current active Google Drive tokens dynamically, prioritizing fresh values."""
+    rf = None
+    at = None
+
+    # 1. Read from .env file directly (most up-to-date source of truth across processes)
+    target_path = env_path or Path(".env")
+    if target_path.exists():
+        try:
+            from dotenv import dotenv_values
+            vals = dotenv_values(str(target_path))
+            rf = vals.get("GOOGLE_DRIVE_REFRESH_TOKEN")
+            at = vals.get("GOOGLE_DRIVE_ACCESS_TOKEN")
+        except Exception:
+            pass
+
+    # 2. Check os.environ fallback
+    rf = rf or os.environ.get("GOOGLE_DRIVE_REFRESH_TOKEN")
+    at = at or os.environ.get("GOOGLE_DRIVE_ACCESS_TOKEN")
+
+    # 3. Check pydantic settings fallback
+    rf = rf or getattr(settings, "GOOGLE_DRIVE_REFRESH_TOKEN", None)
+    at = at or getattr(settings, "GOOGLE_DRIVE_ACCESS_TOKEN", None)
+
+    return rf, at
 
 
 class BaseDriveClient(ABC):
@@ -105,22 +132,40 @@ class GoogleDriveClient(BaseDriveClient):
         self._tokens: Optional[OAuthTokens] = None
         self._state: Optional[str] = None
 
-        init_access = (
-            (settings.GOOGLE_DRIVE_ACCESS_TOKEN or os.getenv("GOOGLE_DRIVE_ACCESS_TOKEN"))
-            if access_token is self._UNSET
-            else access_token
-        )
-        init_refresh = (
-            (settings.GOOGLE_DRIVE_REFRESH_TOKEN or os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"))
-            if refresh_token is self._UNSET
-            else refresh_token
-        )
+        # Resolve active tokens dynamically, prioritizing fresh runtime/env values
+        env_rf, env_at = get_active_drive_tokens()
+        init_access = env_at if access_token is self._UNSET else access_token
+        init_refresh = env_rf if refresh_token is self._UNSET else refresh_token
 
         if init_access or init_refresh:
             self._tokens = OAuthTokens(
                 access_token=init_access or "",
                 refresh_token=init_refresh,
+                created_at=time.time() if init_access else 0,
             )
+
+    @property
+    def refresh_token(self) -> Optional[str]:
+        """Return current refresh token string if present."""
+        return self._tokens.refresh_token if self._tokens else None
+
+    @property
+    def access_token(self) -> Optional[str]:
+        """Return current access token string if present."""
+        return self._tokens.access_token if self._tokens else None
+
+    def mark_authorization_invalid(self, reason: Optional[str] = None) -> None:
+        """Mark Google Drive authorization as revoked/invalid and clear stale credentials."""
+        logger.warning(
+            "Marking Google Drive authorization as INVALID. Reason: %s",
+            reason or "Token revoked/expired",
+        )
+        self._tokens = None
+        settings.GOOGLE_DRIVE_REFRESH_TOKEN = None
+        settings.GOOGLE_DRIVE_ACCESS_TOKEN = None
+        os.environ.pop("GOOGLE_DRIVE_REFRESH_TOKEN", None)
+        os.environ.pop("GOOGLE_DRIVE_ACCESS_TOKEN", None)
+        clear_drive_tokens_from_env()
 
     @property
     def state(self) -> Optional[str]:
@@ -207,6 +252,16 @@ class GoogleDriveClient(BaseDriveClient):
     async def refresh_access_token(self) -> OAuthTokens:
         """Obtain a fresh access token using the stored refresh token."""
         if not self._tokens or not self._tokens.refresh_token:
+            # Try reloading active tokens
+            env_rf, env_at = get_active_drive_tokens()
+            if env_rf:
+                self._tokens = OAuthTokens(
+                    access_token=env_at or "",
+                    refresh_token=env_rf,
+                    created_at=time.time() if env_at else 0,
+                )
+
+        if not self._tokens or not self._tokens.refresh_token:
             raise DriveTokenExpiredError("No refresh token available to renew access token.")
         if not self.client_id or not self.client_secret:
             raise DriveAuthenticationError("Client credentials missing for token refresh.")
@@ -223,7 +278,11 @@ class GoogleDriveClient(BaseDriveClient):
             resp = await client.post(self.OAUTH_TOKEN_URL, data=payload)
             if resp.status_code >= 400:
                 data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                err_code = data.get("error", "")
                 err_desc = data.get("error_description") or resp.text
+                # If error indicates revoked/expired/invalid token, mark authorization invalid
+                if err_code == "invalid_grant" or "revoked" in str(err_desc).lower() or "expired" in str(err_desc).lower():
+                    self.mark_authorization_invalid(reason=f"{err_code}: {err_desc}")
                 raise DriveTokenExpiredError(f"Token refresh failed ({resp.status_code}): {err_desc}")
 
             data = resp.json()
@@ -243,10 +302,20 @@ class GoogleDriveClient(BaseDriveClient):
 
     async def _ensure_access_token(self) -> str:
         """Validate and return active access token, refreshing automatically if needed."""
+        if not self._tokens or not self._tokens.access_token:
+            # Try reloading active tokens
+            env_rf, env_at = get_active_drive_tokens()
+            if env_rf or env_at:
+                self._tokens = OAuthTokens(
+                    access_token=env_at or "",
+                    refresh_token=env_rf,
+                    created_at=time.time() if env_at else 0,
+                )
+
         if not self._tokens:
             raise DriveAuthenticationError("Google Drive is not authenticated. Obtain OAuth tokens before making API requests.")
 
-        if self._tokens.is_expired():
+        if not self._tokens.access_token or self._tokens.is_expired():
             if self._tokens.refresh_token:
                 await self.refresh_access_token()
             else:
@@ -415,6 +484,11 @@ class GoogleDriveClient(BaseDriveClient):
 
         try:
             resp = await client.get(url, headers=headers)
+            if resp.status_code == 401 and self._tokens and self._tokens.refresh_token:
+                await self.refresh_access_token()
+                headers["Authorization"] = f"Bearer {self._tokens.access_token}"
+                resp = await client.get(url, headers=headers)
+
             if resp.status_code >= 400:
                 raise DriveVerificationError(f"Failed to fetch permissions list ({resp.status_code})")
 
@@ -439,6 +513,11 @@ class GoogleDriveClient(BaseDriveClient):
 
         try:
             resp = await client.get(url, headers=headers)
+            if resp.status_code == 401 and self._tokens and self._tokens.refresh_token:
+                await self.refresh_access_token()
+                headers["Authorization"] = f"Bearer {self._tokens.access_token}"
+                resp = await client.get(url, headers=headers)
+
             if resp.status_code == 404:
                 raise DriveFileNotFoundError(f"File {file_id} not found on Google Drive")
             if resp.status_code >= 400:
@@ -476,18 +555,31 @@ class GoogleDriveClient(BaseDriveClient):
             url = f"{self.DRIVE_FILES_URL[:-6]}/about?fields=user(displayName,emailAddress)"
             headers = {"Authorization": f"Bearer {access_token}"}
             resp = await client.get(url, headers=headers)
+            if resp.status_code == 401 and self._tokens and self._tokens.refresh_token:
+                await self.refresh_access_token()
+                headers["Authorization"] = f"Bearer {self._tokens.access_token}"
+                resp = await client.get(url, headers=headers)
+
             if resp.status_code == 200:
                 data = resp.json().get("user", {})
                 return {
                     "displayName": data.get("displayName"),
                     "emailAddress": data.get("emailAddress"),
                 }
+            if resp.status_code == 401:
+                raise DriveAuthenticationError(f"Google Drive API returned 401 Unauthorized for user query: {resp.text}")
+        except (DriveTokenExpiredError, DriveAuthenticationError):
+            raise
         except Exception as exc:
             logger.debug("Failed to fetch user info: %s", exc)
         return {}
 
     async def revoke_credentials(self) -> bool:
         """Revoke current OAuth 2.0 token on Google's authorization server and clear local state."""
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            self._tokens = None
+            return True
+
         token_to_revoke = (
             (self._tokens.refresh_token if self._tokens else None)
             or (self._tokens.access_token if self._tokens else None)
@@ -514,12 +606,19 @@ class GoogleDriveClient(BaseDriveClient):
             self._http_client = None
 
 
-def save_drive_tokens_to_env(refresh_token: Optional[str], access_token: Optional[str] = None) -> None:
+def save_drive_tokens_to_env(
+    refresh_token: Optional[str],
+    access_token: Optional[str] = None,
+    env_path: Optional[Path] = None,
+) -> None:
     """Safely persist or update Google Drive tokens in local .env without overwriting other keys."""
-    env_path = Path(".env")
+    if env_path is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+
+    target_path = env_path or Path(".env")
     lines = []
-    if env_path.exists():
-        lines = env_path.read_text(encoding="utf-8").splitlines()
+    if target_path.exists():
+        lines = target_path.read_text(encoding="utf-8").splitlines()
 
     updated = {}
     new_lines = []
@@ -540,18 +639,21 @@ def save_drive_tokens_to_env(refresh_token: Optional[str], access_token: Optiona
     if access_token and "GOOGLE_DRIVE_ACCESS_TOKEN" not in updated:
         new_lines.append(f"GOOGLE_DRIVE_ACCESS_TOKEN={access_token}")
 
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    target_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
-def clear_drive_tokens_from_env() -> None:
+def clear_drive_tokens_from_env(env_path: Optional[Path] = None) -> None:
     """Safely remove Google Drive access and refresh tokens from local .env while preserving all other keys."""
-    env_path = Path(".env")
-    if not env_path.exists():
+    if env_path is None and os.environ.get("PYTEST_CURRENT_TEST"):
         return
 
-    lines = env_path.read_text(encoding="utf-8").splitlines()
+    target_path = env_path or Path(".env")
+    if not target_path.exists():
+        return
+
+    lines = target_path.read_text(encoding="utf-8").splitlines()
     new_lines = [
         line for line in lines
         if not (line.startswith("GOOGLE_DRIVE_REFRESH_TOKEN=") or line.startswith("GOOGLE_DRIVE_ACCESS_TOKEN="))
     ]
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    target_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")

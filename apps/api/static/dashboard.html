@@ -379,7 +379,7 @@
           const emailEl = document.getElementById("drive-user-email");
           const connectBtn = document.getElementById("drive-connect-btn");
           const disconnectBtn = document.getElementById("drive-disconnect-btn");
-          if (data.connected) {
+          if (data.connected && data.valid !== false) {
             textEl.textContent = "Authorized";
             textEl.className = "font-semibold text-emerald-400";
             if (data.user && data.user.emailAddress) {
@@ -391,8 +391,15 @@
             connectBtn.classList.add("hidden");
             if (disconnectBtn) disconnectBtn.classList.remove("hidden");
           } else {
-            textEl.textContent = "Not Connected";
-            textEl.className = "font-semibold text-amber-400";
+            if (data.reauthorization_required) {
+              textEl.textContent = "Reauthorization Required";
+              textEl.className = "font-semibold text-rose-400";
+              connectBtn.textContent = "Re-authorize Google Drive";
+            } else {
+              textEl.textContent = "Not Connected";
+              textEl.className = "font-semibold text-amber-400";
+              connectBtn.textContent = "Connect Google Drive";
+            }
             if (emailEl) emailEl.classList.add("hidden");
             connectBtn.classList.remove("hidden");
             if (disconnectBtn) disconnectBtn.classList.add("hidden");

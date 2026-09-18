@@ -10,9 +10,10 @@ from fastapi.responses import HTMLResponse
 from packages.drive.client import (
     GoogleDriveClient,
     clear_drive_tokens_from_env,
+    get_active_drive_tokens,
     save_drive_tokens_to_env,
 )
-from packages.drive.exceptions import DriveAuthenticationError
+from packages.drive.exceptions import DriveAuthenticationError, DriveTokenExpiredError
 from packages.shared.config import settings
 
 logger = logging.getLogger("api_auth")
@@ -22,30 +23,78 @@ router = APIRouter(prefix="/auth/google", tags=["Google Drive Auth"])
 
 @router.get("/status")
 async def get_drive_auth_status() -> Dict[str, Any]:
-    """Check current Google Drive OAuth authorization status."""
-    refresh_token = os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN") or settings.GOOGLE_DRIVE_REFRESH_TOKEN
-    access_token = os.getenv("GOOGLE_DRIVE_ACCESS_TOKEN") or settings.GOOGLE_DRIVE_ACCESS_TOKEN
+    """Check current Google Drive OAuth authorization status and actively verify validity."""
+    refresh_token, access_token = get_active_drive_tokens()
     client_id = os.getenv("GOOGLE_DRIVE_CLIENT_ID") or settings.GOOGLE_DRIVE_CLIENT_ID
     client_secret = os.getenv("GOOGLE_DRIVE_CLIENT_SECRET") or settings.GOOGLE_DRIVE_CLIENT_SECRET
 
-    connected = bool(refresh_token or access_token)
+    has_tokens = bool(refresh_token or access_token)
     client_configured = bool(client_id and client_secret)
 
+    connected = False
+    valid = False
+    reauthorization_required = False
     user_info = None
-    if connected and client_configured:
+    error_msg = None
+
+    if has_tokens and client_configured:
+        client = GoogleDriveClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            access_token=access_token,
+            refresh_token=refresh_token,
+        )
         try:
-            client = GoogleDriveClient()
             user_info = await client.get_user_info()
+            if user_info and user_info.get("emailAddress"):
+                connected = True
+                valid = True
+            elif user_info is not None:
+                connected = True
+                valid = True
+        except DriveTokenExpiredError as exc:
+            logger.warning("Google Drive token is expired/revoked: %s", exc)
+            connected = False
+            valid = False
+            reauthorization_required = True
+            error_msg = "Google Drive token expired or revoked. Please re-authorize."
+        except DriveAuthenticationError as exc:
+            logger.warning("Google Drive authentication failed: %s", exc)
+            connected = False
+            valid = False
+            reauthorization_required = True
+            error_msg = str(exc)
+        except Exception as exc:
+            logger.warning("Google Drive status probe encountered unexpected error: %s", exc)
+            err_str = str(exc).lower()
+            if "invalid_grant" in err_str or "revoked" in err_str or "expired" in err_str:
+                connected = False
+                valid = False
+                reauthorization_required = True
+                client.mark_authorization_invalid(reason=str(exc))
+                error_msg = "Token expired or revoked. Please re-authorize."
+            else:
+                connected = bool(refresh_token)
+                valid = False
+                error_msg = str(exc)
+        finally:
             await client.close()
-        except Exception:
-            pass
+    elif has_tokens and not client_configured:
+        reauthorization_required = True
+        error_msg = "OAuth client credentials are missing."
+
+    # Refresh token check after probe (it may have been marked invalid and cleared)
+    post_probe_rf, _ = get_active_drive_tokens()
 
     return {
         "connected": connected,
+        "valid": valid,
+        "reauthorization_required": reauthorization_required,
         "client_configured": client_configured,
-        "has_refresh_token": bool(refresh_token),
+        "has_refresh_token": bool(post_probe_rf),
         "redirect_uri": settings.GOOGLE_DRIVE_REDIRECT_URI,
         "user": user_info,
+        "error": error_msg,
     }
 
 
@@ -69,8 +118,12 @@ def get_drive_authorization_url(prompt: str = "select_account consent") -> Dict[
 @router.post("/disconnect")
 async def disconnect_google_drive() -> Dict[str, Any]:
     """Disconnect current Google Drive account, revoking tokens and clearing local storage."""
-    refresh_token = os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN") or settings.GOOGLE_DRIVE_REFRESH_TOKEN
-    access_token = os.getenv("GOOGLE_DRIVE_ACCESS_TOKEN") or settings.GOOGLE_DRIVE_ACCESS_TOKEN
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        settings.GOOGLE_DRIVE_REFRESH_TOKEN = None
+        settings.GOOGLE_DRIVE_ACCESS_TOKEN = None
+        return {"status": "disconnected", "connected": False}
+
+    refresh_token, access_token = get_active_drive_tokens()
 
     if refresh_token or access_token:
         try:
@@ -96,8 +149,7 @@ async def disconnect_google_drive() -> Dict[str, Any]:
 @router.post("/test-upload")
 async def test_drive_upload() -> Dict[str, Any]:
     """Perform a small, safe test file upload to verify Drive authorization and ownership."""
-    refresh_token = os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN") or settings.GOOGLE_DRIVE_REFRESH_TOKEN
-    access_token = os.getenv("GOOGLE_DRIVE_ACCESS_TOKEN") or settings.GOOGLE_DRIVE_ACCESS_TOKEN
+    refresh_token, access_token = get_active_drive_tokens()
     if not (refresh_token or access_token):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

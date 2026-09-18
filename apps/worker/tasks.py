@@ -72,11 +72,14 @@ def redact_sensitive_info(text: Any) -> str:
         return ""
     text_str = str(text)
     patterns = [
-        (r"(?i)(password['\":\s=]+)[^\s,;'\"]+", r"\1[REDACTED]"),
-        (r"(?i)(token['\":\s=]+)[^\s,;'\"]+", r"\1[REDACTED]"),
-        (r"(?i)(secret['\":\s=]+)[^\s,;'\"]+", r"\1[REDACTED]"),
+        (r"(?i)(password['\":\s=]*[:=]['\"\s]*)[^\s,;'\"]+", r"\1[REDACTED]"),
+        (r"(?i)(token['\":\s=]*[:=]['\"\s]*)[^\s,;'\"]+", r"\1[REDACTED]"),
+        (r"(?i)(secret['\":\s=]*[:=]['\"\s]*)[^\s,;'\"]+", r"\1[REDACTED]"),
+        (r"(?i)(client_secret['\":\s=]*[:=]['\"\s]*)[^\s,;'\"]+", r"\1[REDACTED]"),
         (r"(?i)(bearer\s+)[a-zA-Z0-9_\-\.]+", r"\1[REDACTED]"),
-        (r"(?i)(client_secret['\":\s=]+)[^\s,;'\"]+", r"\1[REDACTED]"),
+        (r"ya29\.[a-zA-Z0-9_\-]+", "[REDACTED]"),
+        (r"1//[a-zA-Z0-9_\-]+", "[REDACTED]"),
+        (r"ey[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]*", "[REDACTED]"),
     ]
     for pat, repl in patterns:
         text_str = re.sub(pat, repl, text_str)
@@ -468,12 +471,16 @@ async def _run_job_workflow(
             else:
                 if drive_client is None:
                     gdrive_creds = (credentials or {}).get("google_drive") or {}
-                    drive_client = GoogleDriveClient(
-                        client_id=gdrive_creds.get("client_id") or settings.GOOGLE_DRIVE_CLIENT_ID,
-                        client_secret=gdrive_creds.get("client_secret") or settings.GOOGLE_DRIVE_CLIENT_SECRET,
-                        access_token=gdrive_creds.get("access_token") or settings.GOOGLE_DRIVE_ACCESS_TOKEN,
-                        refresh_token=gdrive_creds.get("refresh_token") or settings.GOOGLE_DRIVE_REFRESH_TOKEN,
-                    )
+                    drive_kwargs = {}
+                    if gdrive_creds.get("client_id"):
+                        drive_kwargs["client_id"] = gdrive_creds["client_id"]
+                    if gdrive_creds.get("client_secret"):
+                        drive_kwargs["client_secret"] = gdrive_creds["client_secret"]
+                    if gdrive_creds.get("access_token"):
+                        drive_kwargs["access_token"] = gdrive_creds["access_token"]
+                    if gdrive_creds.get("refresh_token"):
+                        drive_kwargs["refresh_token"] = gdrive_creds["refresh_token"]
+                    drive_client = GoogleDriveClient(**drive_kwargs)
 
                 upload_meta = await drive_client.upload_file(
                     local_path=completed_file,
