@@ -12,6 +12,7 @@ import docx
 from docx.text.paragraph import Paragraph
 from docx.table import Table
 
+from packages.worksheets.answer_target import is_answer_placeholder_text
 from packages.worksheets.base_parser import BaseWorksheetParser
 from packages.worksheets.classifier import QuestionClassifier
 from packages.worksheets.models import (
@@ -195,6 +196,12 @@ class DocxWorksheetParser(BaseWorksheetParser):
                         current_question.options.append(QuestionOption(key=opt_key, text=opt_text))
                         continue
 
+                    # Check if this paragraph is an explicit answer placeholder
+                    if is_answer_placeholder_text(text):
+                        current_question.source_location["answer_placeholder_paragraph_index"] = block_idx
+                        current_question.formatting_metadata["answer_placeholder_text"] = text
+                        continue
+
                     # Check for Activity / Deliverable sub-parts (like in 1011.docx)
                     if any(text.startswith(prefix) for prefix in [
                         "🧩 Activity:", "Activity:", "🎯 Learning Objective:",
@@ -346,6 +353,7 @@ class DocxWorksheetParser(BaseWorksheetParser):
         q_col_idx = -1
         num_col_idx = -1
         marks_col_idx = -1
+        ans_col_idx = -1
 
         for idx, h in enumerate(header_cells):
             if any(term in h for term in ["question", "problem", "statement", "task"]):
@@ -354,11 +362,28 @@ class DocxWorksheetParser(BaseWorksheetParser):
                 num_col_idx = idx
             elif any(term in h for term in ["marks", "mark", "max marks", "pts"]):
                 marks_col_idx = idx
+            elif any(term in h for term in ["answer", "solution", "response", "output", "result"]):
+                ans_col_idx = idx
+
+        start_r = 1
+        if q_col_idx == -1:
+            for test_row in table.rows:
+                for c_idx, cell in enumerate(test_row.cells):
+                    txt = cell.text.strip()
+                    if self._match_question_start(txt):
+                        q_col_idx = c_idx
+                        break
+                if q_col_idx != -1:
+                    break
+            if q_col_idx != -1:
+                start_r = 0
+                if q_col_idx + 1 < len(table.rows[0].cells):
+                    ans_col_idx = q_col_idx + 1
 
         # If question column is identified, this is a questions table
         if q_col_idx != -1:
             extracted: List[ParsedQuestion] = []
-            for r_idx, row in enumerate(table.rows[1:], start=1):
+            for r_idx, row in enumerate(table.rows[start_r:], start=start_r):
                 if q_col_idx >= len(row.cells):
                     continue
                 q_text = row.cells[q_col_idx].text.strip()
@@ -385,6 +410,14 @@ class DocxWorksheetParser(BaseWorksheetParser):
 
                 clean_text, inline_opts = QuestionClassifier.extract_inline_options(q_text)
 
+                source_loc = {
+                    "table_index": table_idx,
+                    "row_index": r_idx,
+                    "col_index": q_col_idx,
+                }
+                if ans_col_idx != -1:
+                    source_loc["answer_col_index"] = ans_col_idx
+
                 pq = ParsedQuestion(
                     question_id=f"tbl_{table_idx}_r{r_idx}_{q_num}",
                     question_number=q_num,
@@ -393,7 +426,7 @@ class DocxWorksheetParser(BaseWorksheetParser):
                     marks=marks,
                     section=section.name if section else None,
                     source_order=start_order + len(extracted),
-                    source_location={"table_index": table_idx, "row_index": r_idx},
+                    source_location=source_loc,
                     formatting_metadata={"table_row": True},
                 )
                 self._finalize_question(pq)

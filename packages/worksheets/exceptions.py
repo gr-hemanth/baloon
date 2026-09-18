@@ -41,3 +41,9 @@ class LLMResponseError(AnswerEngineError):
 class MissingAnswerError(AnswerEngineError):
     """Raised when the LLM response is missing required question answers."""
     pass
+
+
+class WorksheetFillingError(Exception):
+    """Raised when an answer target cannot be resolved or filled into a designated document location."""
+    pass
+
