@@ -520,15 +520,16 @@ async def _run_job_workflow(
                 ]
                 cand_keys = [k for k in cand_keys if k is not None]
 
+                practice_val = None
                 if isinstance(session_status.practice_status, dict):
                     for k in cand_keys:
-                        if k in session_status.practice_status:
+                        if k in session_status.practice_status and session_status.practice_status[k] is not None:
                             practice_val = session_status.practice_status[k]
                             break
                 elif isinstance(session_status.practice_status, int):
                     practice_val = session_status.practice_status
 
-                if practice_val in (1, 2):
+                if practice_val is not None and practice_val in (1, 2):
                     rec_link = None
                     if isinstance(session_status.slo_links, dict):
                         for k in cand_keys:

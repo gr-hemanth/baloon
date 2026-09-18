@@ -814,39 +814,60 @@ class SRMHttpClient(SRMClient):
             return True
 
         try:
-            session = int(session_or_worksheet_id)
+            raw_id = int(session_or_worksheet_id)
         except (ValueError, TypeError):
-            session = 1
+            raw_id = 1
+
+        # Derive session and actual SLO accurately
+        if raw_id >= 1000:
+            session = raw_id // 10
+            actual_slo = slo if slo is not None else (raw_id % 10)
+        else:
+            session = raw_id
+            actual_slo = slo if slo is not None else 1
 
         status_obj = await self.get_session_status(course_info=course_info, session=session)
-        key_full = f"{session}{slo}"
-        key_short = f"{session % 100}{slo}" if session >= 100 else key_full
+        key_full = f"{session}{actual_slo}"
+        key_short = f"{session % 100}{actual_slo}" if session >= 100 else key_full
+        key_raw = str(raw_id)
         key_sess = str(session)
 
+        # Build candidate keys prioritizing exact SLO keys (full 4-digit and short 2-digit)
         candidate_keys = [
             key_full,
             int(key_full) if key_full.isdigit() else None,
             key_short,
             int(key_short) if key_short.isdigit() else None,
+            key_raw,
+            int(key_raw) if key_raw.isdigit() else None,
             key_sess,
             session,
         ]
-        candidate_keys = [k for k in candidate_keys if k is not None]
+        seen = set()
+        deduped = []
+        for k in candidate_keys:
+            if k is not None and k not in seen:
+                seen.add(k)
+                deduped.append(k)
+        candidate_keys = deduped
 
         recorded_raw = None
-        if isinstance(status_obj.slo_links, dict):
+        if status_obj and isinstance(status_obj.slo_links, dict):
             for k in candidate_keys:
                 if k in status_obj.slo_links and status_obj.slo_links[k]:
                     recorded_raw = status_obj.slo_links[k]
                     break
 
-        practice_val = None
-        if isinstance(status_obj.practice_status, dict):
+        practice_val: Optional[int] = None
+        if status_obj and isinstance(status_obj.practice_status, dict):
             for k in candidate_keys:
                 if k in status_obj.practice_status and status_obj.practice_status[k] is not None:
-                    practice_val = status_obj.practice_status[k]
+                    try:
+                        practice_val = int(status_obj.practice_status[k])
+                    except (ValueError, TypeError):
+                        practice_val = status_obj.practice_status[k]
                     break
-        elif isinstance(status_obj.practice_status, int):
+        elif status_obj and isinstance(status_obj.practice_status, int):
             practice_val = status_obj.practice_status
 
         if expected_link:
@@ -856,8 +877,8 @@ class SRMHttpClient(SRMClient):
             if not canonical_recorded:
                 avail_keys = (
                     list(status_obj.slo_links.keys())
-                    if isinstance(status_obj.slo_links, dict)
-                    else status_obj.slo_links
+                    if status_obj and isinstance(status_obj.slo_links, dict)
+                    else (status_obj.slo_links if status_obj else None)
                 )
                 raise VerificationFailed(
                     f"Verification failed: no recorded link found on SRM for session {key_full} "
@@ -870,10 +891,16 @@ class SRMHttpClient(SRMClient):
                     f"Expected canonical: {canonical_expected}, Recorded canonical: {canonical_recorded}"
                 )
 
+        # Requirement 6 & 7: PRACTICE must be 1 (Pending) or 2 (Verified)
         if practice_val not in (1, 2):
-            logger.warning(
-                "Worksheet status for session %s is %s (expected 1=Pending or 2=Verified)",
-                key_full, practice_val
+            avail_practice = (
+                list(status_obj.practice_status.keys())
+                if status_obj and isinstance(status_obj.practice_status, dict)
+                else (status_obj.practice_status if status_obj else None)
+            )
+            raise VerificationFailed(
+                f"Verification failed: invalid or missing practice status ({practice_val}) for session {key_full} "
+                f"(expected 1=Pending or 2=Verified, available_practice_keys={avail_practice})"
             )
 
         logger.info(
