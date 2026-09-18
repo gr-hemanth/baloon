@@ -156,6 +156,15 @@ def test_drive_oauth_callback_error_handling(client: TestClient):
     assert "Authorization Denied" in resp.text
 
 
+def test_drive_oauth_disconnect_endpoint(client: TestClient):
+    """Verify POST /api/v1/auth/google/disconnect clears tokens and returns disconnected status."""
+    resp = client.post("/api/v1/auth/google/disconnect")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "disconnected"
+    assert data["connected"] is False
+
+
 @pytest.mark.asyncio
 async def test_srm_discovery_success_semester_3(client: TestClient):
     """Verify POST /api/v1/srm/discover returns Semester 3 courses and available worksheets."""

@@ -35,6 +35,8 @@ class OAuthTokens(BaseModel):
 
     def is_expired(self, skew_seconds: int = 60) -> bool:
         """Check if access token has expired or is nearing expiry."""
+        if not self.access_token:
+            return True
         now = time.time()
         return (now - self.created_at) >= (self.expires_in - skew_seconds)
 

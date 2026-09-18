@@ -124,7 +124,7 @@ class SRMBrowserClient(SRMClient):
         page = await self._init_browser()
         if page.url == "about:blank" or not page.url.startswith("http"):
             try:
-                await page.goto(self.base_url, wait_until="domcontentloaded", timeout=15000)
+                await page.goto(self.base_url, wait_until="domcontentloaded", timeout=30000)
             except Exception as e:
                 logger.warning("Could not navigate to portal for captcha: %s", e)
         # Click "START LEARNING" if on landing page

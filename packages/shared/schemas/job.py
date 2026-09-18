@@ -10,6 +10,8 @@ class JobCreate(BaseModel):
     semester_id: Optional[str] = None
     subject_id: Optional[str] = None
     worksheet_id: Optional[str] = None
+    session: Optional[int] = None
+    slo: Optional[int] = None
     transport_mode: Optional[str] = "auto"  # "http", "browser", "auto"
     credentials: Optional[Dict[str, Any]] = None  # Ephemeral user credentials, never persisted to DB
     force: Optional[bool] = False  # If True, bypasses active duplicate check
@@ -24,6 +26,7 @@ class SRMDiscoverRequest(BaseModel):
 
 
 class SRMWorksheetItem(BaseModel):
+    worksheet_id: Optional[str] = None
     session: int
     slo: int
     filename: str

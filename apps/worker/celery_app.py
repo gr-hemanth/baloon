@@ -22,5 +22,8 @@ celery_app.conf.update(
 )
 
 # Allow local test execution without live Redis if CELERY_TASK_ALWAYS_EAGER=True
-if os.getenv("CELERY_TASK_ALWAYS_EAGER", "False").lower() in ("true", "1"):
+if (
+    getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False)
+    or os.getenv("CELERY_TASK_ALWAYS_EAGER", "False").lower() in ("true", "1")
+):
     celery_app.conf.task_always_eager = True

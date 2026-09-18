@@ -843,15 +843,28 @@ class LLMAnswerEngine(BaseAnswerEngine):
         }
 
         system_prompt = (
-            "You are an expert academic evaluator and university professor.\n"
-            "You must solve the user's exam/worksheet questions accurately and completely.\n"
-            "CRITICAL: You MUST respond ONLY with a valid JSON object matching this schema:\n"
+            "You are a capable, knowledgeable college student writing exam and worksheet solutions.\n"
+            "Your writing must read like authentic student coursework: technically accurate, clear, and direct.\n\n"
+            "STRICT RULES (CRITICAL):\n"
+            "1. NO MARKDOWN ARTIFACTS OR FORMATTING IN 'answer_text':\n"
+            "   - Do NOT use markdown headers (no '#', '##', '###', '####').\n"
+            "   - Do NOT use bold markdown (no '**' or '__').\n"
+            "   - Do NOT use italics (no '*' or '_').\n"
+            "   - Do NOT use bullet points with asterisks or dashes (no '*' or '- ').\n"
+            "   - Write only in standard, natural English sentences and paragraphs.\n"
+            "2. NO AI PHRASING, INTROS, OR FILLER:\n"
+            "   - Never say 'Certainly!', 'Here is the answer:', 'As a college student...', 'In conclusion', or 'Furthermore'.\n"
+            "   - Answer directly and plainly without conversational preambles or robotic summaries.\n"
+            "3. STRUCTURING LONG DELIVERABLES:\n"
+            "   - Use clean, standard numbering ('1.', '2.') or plain text capitalized labels on their own lines (e.g. 'Problem Statement:', 'Proposed Solution:'). Do NOT bold them.\n"
+            "4. RESPONSE SCHEMA:\n"
+            "   - Respond ONLY with a valid JSON object matching this schema:\n"
             "{\n"
             '  "answers": [\n'
             "    {\n"
             '      "question_id": "<exact question_id from input>",\n'
             '      "question_number": "<question_number or null>",\n'
-            '      "answer_text": "<answer text>",\n'
+            '      "answer_text": "<clean, natural student answer without markdown artifacts>",\n'
             '      "selected_option": "<option letter like A, B, C, D if MCQ, otherwise null>",\n'
             '      "confidence": <float 0.0 to 1.0>,\n'
             '      "explanation": "<brief rationale>"\n'
@@ -869,14 +882,16 @@ class LLMAnswerEngine(BaseAnswerEngine):
             "Guidelines per question type:\n"
             "1. MCQ (Multiple Choice):\n"
             "   - In 'selected_option', put the exact option letter (A, B, C, or D).\n"
-            "   - In 'answer_text', provide the selected option text.\n"
+            "   - In 'answer_text', provide ONLY the plain text of the selected option (no markdown, no prefixes).\n"
             "   - In 'confidence', float between 0.0 and 1.0 (typically 0.9-1.0).\n"
             "2. ONE_WORD / Fill-in-the-blank / True-False:\n"
-            "   - In 'answer_text', provide the concise exact term, acronym expansion, or True/False.\n"
-            "3. SHORT_ANSWER:\n"
-            "   - In 'answer_text', provide 2-4 comprehensive, structured technical sentences or points.\n"
-            "4. LONG_ANSWER / Case Study / Workshop / Simulation:\n"
-            "   - In 'answer_text', provide thorough, structured technical answers with clear headings or deliverables.\n\n"
+            "   - In 'answer_text', provide only the exact single term, acronym expansion, port, or True/False. No full sentences, no markdown.\n"
+            "3. SHORT_ANSWER (1-4 marks):\n"
+            "   - In 'answer_text', provide 2 to 4 concise, clear sentences in a single coherent paragraph. Directly answer the question without headers, bolding, or bullets.\n"
+            "4. LONG_ANSWER / Case Study / Workshop / Simulation (5-16 marks):\n"
+            "   - In 'answer_text', write a thorough, well-reasoned response in natural student paragraphs.\n"
+            "   - If organizing into sections, use plain text labels on their own lines (e.g. 'Project Goals:', 'Tech Stack:', 'Challenges:') or standard numbering ('1.', '2.').\n"
+            "   - Absolutely NO markdown headers (###), NO bold text (**), and NO bullet asterisks (*).\n\n"
             "Questions to answer:\n"
             f"{json.dumps(questions_payload, indent=2)}"
         )
@@ -1002,8 +1017,20 @@ class LLMAnswerEngine(BaseAnswerEngine):
         }
 
         prompt = (
-            "You are an expert academic evaluator and university professor.\n"
-            "Generate complete, technically rigorous, and accurate answers for every question in the following SRM eCurricula worksheet.\n\n"
+            "You are a capable, knowledgeable college student writing exam and worksheet solutions.\n"
+            "Your writing must read like authentic student coursework: technically accurate, clear, and direct.\n\n"
+            "STRICT RULES (CRITICAL):\n"
+            "1. NO MARKDOWN ARTIFACTS OR FORMATTING IN 'answer_text':\n"
+            "   - Do NOT use markdown headers (no '#', '##', '###', '####').\n"
+            "   - Do NOT use bold markdown (no '**' or '__').\n"
+            "   - Do NOT use italics (no '*' or '_').\n"
+            "   - Do NOT use bullet points with asterisks or dashes (no '*' or '- ').\n"
+            "   - Write only in standard, natural English sentences and paragraphs.\n"
+            "2. NO AI PHRASING, INTROS, OR FILLER:\n"
+            "   - Never say 'Certainly!', 'Here is the answer:', 'As a college student...', 'In conclusion', or 'Furthermore'.\n"
+            "   - Answer directly and plainly without conversational preambles or robotic summaries.\n"
+            "3. STRUCTURING LONG DELIVERABLES:\n"
+            "   - Use clean, standard numbering ('1.', '2.') or plain text capitalized labels on their own lines (e.g. 'Problem Statement:', 'Proposed Solution:'). Do NOT bold them.\n\n"
             f"Worksheet Context:\n"
             f"- Course Code: {ws_context['course_code']}\n"
             f"- Course Title: {ws_context['course_name']}\n"
@@ -1012,14 +1039,16 @@ class LLMAnswerEngine(BaseAnswerEngine):
             "Guidelines per question type:\n"
             "1. MCQ (Multiple Choice):\n"
             "   - In 'selected_option', put the exact option letter (A, B, C, or D).\n"
-            "   - In 'answer_text', provide the selected option text.\n"
+            "   - In 'answer_text', provide ONLY the plain text of the selected option (no markdown, no prefixes).\n"
             "   - In 'confidence', float between 0.0 and 1.0 (typically 0.9-1.0).\n"
             "2. ONE_WORD / Fill-in-the-blank / True-False:\n"
-            "   - In 'answer_text', provide the concise exact term, acronym expansion, or True/False.\n"
-            "3. SHORT_ANSWER:\n"
-            "   - In 'answer_text', provide 2-4 comprehensive, structured technical sentences or points.\n"
-            "4. LONG_ANSWER / Case Study / Workshop / Simulation:\n"
-            "   - In 'answer_text', provide thorough, structured technical answers with clear headings or deliverables.\n\n"
+            "   - In 'answer_text', provide only the exact single term, acronym expansion, port, or True/False. No full sentences, no markdown.\n"
+            "3. SHORT_ANSWER (1-4 marks):\n"
+            "   - In 'answer_text', provide 2 to 4 concise, clear sentences in a single coherent paragraph. Directly answer the question without headers, bolding, or bullets.\n"
+            "4. LONG_ANSWER / Case Study / Workshop / Simulation (5-16 marks):\n"
+            "   - In 'answer_text', write a thorough, well-reasoned response in natural student paragraphs.\n"
+            "   - If organizing into sections, use plain text labels on their own lines (e.g. 'Project Goals:', 'Tech Stack:', 'Challenges:') or standard numbering ('1.', '2.').\n"
+            "   - Absolutely NO markdown headers (###), NO bold text (**), and NO bullet asterisks (*).\n\n"
             "Questions to answer:\n"
             f"{json.dumps(questions_payload, indent=2)}\n\n"
             "CRITICAL REQUIREMENT:\n"
@@ -1029,7 +1058,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
             "    {\n"
             '      "question_id": "<exact question_id from input>",\n'
             '      "question_number": "<question_number or null>",\n'
-            '      "answer_text": "<the answer text>",\n'
+            '      "answer_text": "<clean, natural student answer without markdown artifacts>",\n'
             '      "selected_option": "<option letter if MCQ, otherwise null>",\n'
             '      "confidence": <float between 0.0 and 1.0>,\n'
             '      "explanation": "<brief rationale>"\n'

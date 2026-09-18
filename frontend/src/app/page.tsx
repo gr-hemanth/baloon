@@ -105,12 +105,14 @@ export default function DashboardPage() {
     setIsStartingJob(true);
     setJobError(null);
     try {
-      const wsId = `${selectedWorksheet.session}${selectedWorksheet.slo}`;
+      const wsId = selectedWorksheet.worksheet_id || `${selectedWorksheet.session}${selectedWorksheet.slo}`;
       const job = await createJob({
         user_id: userId,
         course_id: selectedCourseCode,
         semester_id: String(semester),
         worksheet_id: wsId,
+        session: selectedWorksheet.session,
+        slo: selectedWorksheet.slo,
         transport_mode: transportMode,
         credentials: { USER_ID: userId, PASSWORD: password },
       });
@@ -353,7 +355,7 @@ export default function DashboardPage() {
                           selectedWorksheet.slo === ws.slo;
                         return (
                           <div
-                            key={`${ws.session}-${ws.slo}`}
+                            key={ws.worksheet_id || `${ws.session}-${ws.slo}`}
                             onClick={() => setSelectedWorksheet(ws)}
                             className={`flex items-center justify-between p-2.5 rounded-lg border cursor-pointer transition ${
                               isSelected

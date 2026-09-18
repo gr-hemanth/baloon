@@ -12,6 +12,7 @@ export interface GoogleDriveStatus {
 }
 
 export interface WorksheetItem {
+  worksheet_id?: string;
   session: number;
   slo: number;
   filename: string;
@@ -111,6 +112,8 @@ export async function createJob(params: {
   course_id: string;
   semester_id: string;
   worksheet_id: string;
+  session?: number;
+  slo?: number;
   transport_mode?: string;
   credentials: { USER_ID: string; PASSWORD: string };
 }): Promise<JobResponse> {

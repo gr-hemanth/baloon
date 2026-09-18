@@ -96,6 +96,7 @@ async def discover_srm_courses(req: SRMDiscoverRequest) -> SRMDiscoverResponse:
                 )
                 ws_items = [
                     SRMWorksheetItem(
+                        worksheet_id=w.identifier,
                         session=w.session or 1,
                         slo=w.slo or 1,
                         filename=w.filename,

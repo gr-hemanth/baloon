@@ -196,19 +196,82 @@ async def _run_job_workflow(
             session_num = 1
             slo_num = 1
             explicit_session: Optional[int] = None
+            requested_slo: Optional[int] = None
+            has_explicit_ws = False
+
+            # Check credentials for explicit session / slo
+            if credentials:
+                if credentials.get("requested_session") is not None:
+                    try:
+                        session_num = int(credentials["requested_session"])
+                        explicit_session = session_num
+                        has_explicit_ws = True
+                    except (ValueError, TypeError):
+                        pass
+                if credentials.get("requested_slo") is not None:
+                    try:
+                        slo_num = int(credentials["requested_slo"])
+                        requested_slo = slo_num
+                        has_explicit_ws = True
+                    except (ValueError, TypeError):
+                        pass
+
             if job.worksheet_id:
-                ws_str = str(job.worksheet_id).strip()
-                if ws_str.isdigit():
-                    if len(ws_str) >= 4:
-                        session_num = int(ws_str[:-1])
-                        slo_num = int(ws_str[-1])
-                    elif len(ws_str) == 2:
-                        session_num = int(ws_str[0])
-                        slo_num = int(ws_str[1])
-                    else:
-                        session_num = int(ws_str)
-                        slo_num = 1
+                has_explicit_ws = True
+                ws_raw = str(job.worksheet_id).strip()
+                ws_clean = ws_raw.rsplit(".", 1)[0].strip() if "." in ws_raw else ws_raw
+
+                import re
+                unit_sess_slo_match = re.search(r"unit\s*(\d+).*?session\s*(\d+).*?slo\s*(\d+)", ws_raw, re.IGNORECASE)
+                sess_slo_match = re.search(r"session\s*(\d+).*?slo\s*(\d+)", ws_raw, re.IGNORECASE)
+                slo_only_match = re.search(r"slo\s*(\d+)", ws_raw, re.IGNORECASE)
+
+                if unit_sess_slo_match:
+                    u_val = int(unit_sess_slo_match.group(1))
+                    s_val = int(unit_sess_slo_match.group(2))
+                    slo_val = int(unit_sess_slo_match.group(3))
+                    session_num = 100 * u_val + s_val
                     explicit_session = session_num
+                    slo_num = slo_val
+                    requested_slo = slo_num
+                elif sess_slo_match:
+                    s_val = int(sess_slo_match.group(1))
+                    slo_val = int(sess_slo_match.group(2))
+                    session_num = s_val if s_val >= 100 else 100 + s_val
+                    explicit_session = session_num
+                    slo_num = slo_val
+                    requested_slo = slo_num
+                else:
+                    # Check for separators like 105_2, 105-2, 105/2, 105:2
+                    matched_delim = False
+                    for sep in ("_", "-", "/", ":"):
+                        if sep in ws_clean:
+                            parts = ws_clean.split(sep, 1)
+                            if parts[0].isdigit() and parts[1].isdigit():
+                                session_num = int(parts[0])
+                                slo_num = int(parts[1])
+                                requested_slo = slo_num
+                                explicit_session = session_num
+                                matched_delim = True
+                                break
+
+                    if not matched_delim and ws_clean.isdigit():
+                        if len(ws_clean) >= 4:
+                            session_num = int(ws_clean[:-1])
+                            slo_num = int(ws_clean[-1])
+                            requested_slo = slo_num
+                        elif len(ws_clean) == 2:
+                            session_num = int(ws_clean[0])
+                            slo_num = int(ws_clean[1])
+                            requested_slo = slo_num
+                        else:
+                            session_num = int(ws_clean)
+                            if requested_slo is None:
+                                requested_slo = None  # user specified session only, e.g. 105
+                        explicit_session = session_num
+                    elif slo_only_match and requested_slo is None:
+                        requested_slo = int(slo_only_match.group(1))
+                        slo_num = requested_slo
 
             # 7. State: DOWNLOADING
             job.status = JobStatus.DOWNLOADING
@@ -240,24 +303,83 @@ async def _run_job_workflow(
                         session=explicit_session,
                         format_type="docx",
                     )
-                    available = [w for w in discovered if w.is_available]
-                    if available:
-                        # Prioritize unsubmitted worksheets
-                        unsubmitted = [w for w in available if w.submission_status != "VERIFIED"]
-                        target_ws = unsubmitted[0] if unsubmitted else available[0]
+
+                    target_ws = None
+                    if has_explicit_ws:
+                        # 1. Exact match on both session and requested_slo
+                        if requested_slo is not None:
+                            for w in discovered:
+                                is_sess_match = (
+                                    w.session == session_num
+                                    or w.session_no == session_num
+                                    or (w.session >= 100 and w.session % 100 == session_num)
+                                    or (session_num >= 100 and w.session == session_num % 100)
+                                )
+                                if is_sess_match and w.slo == requested_slo:
+                                    target_ws = w
+                                    break
+
+                        # 2. Match on worksheet identifier, filename, or title
+                        if target_ws is None:
+                            ws_raw_lower = ws_raw.lower()
+                            ws_clean_lower = ws_clean.lower()
+                            for w in discovered:
+                                if (
+                                    w.identifier == ws_clean
+                                    or (w.filename and w.filename.lower() in (ws_raw_lower, f"{ws_clean_lower}.docx"))
+                                    or (hasattr(w, "title") and w.title and w.title.lower() == ws_raw_lower)
+                                ):
+                                    target_ws = w
+                                    break
+
+                        # 3. If user specified only session without explicit SLO (e.g. "105"):
+                        if target_ws is None and requested_slo is None and explicit_session is not None:
+                            session_matches = [
+                                w for w in discovered
+                                if (w.session == explicit_session or w.session_no == explicit_session)
+                                and w.is_available
+                            ]
+                            if session_matches:
+                                unsubmitted = [w for w in session_matches if w.submission_status != "VERIFIED"]
+                                target_ws = unsubmitted[0] if unsubmitted else session_matches[0]
+                    else:
+                        # Auto mode: no worksheet_id specified; pick first unsubmitted or available
+                        available = [w for w in discovered if w.is_available]
+                        if available:
+                            unsubmitted = [w for w in available if w.submission_status != "VERIFIED"]
+                            target_ws = unsubmitted[0] if unsubmitted else available[0]
+
+                    if target_ws is not None:
                         file_url = target_ws.download_url
                         worksheet_filename = target_ws.filename
                         session_num = target_ws.session or session_num
                         slo_num = target_ws.slo or slo_num
+                        logger.info(
+                            "Target worksheet selected from SRM discovery: session=%d, slo=%d, filename=%s",
+                            session_num, slo_num, worksheet_filename
+                        )
+                        if not file_url:
+                            file_url = await orchestrator.get_worksheet_file(
+                                course_code=course_code,
+                                session=session_num,
+                                slo=slo_num,
+                                format_type="docx",
+                                filename=worksheet_filename,
+                            )
                     else:
+                        # Explicit worksheet requested but not found in discovered (or discovery empty)
+                        # Derive directly without falling back to a different SLO
+                        worksheet_filename = f"{session_num}{slo_num}.docx"
                         file_url = await orchestrator.get_worksheet_file(
                             course_code=course_code,
                             session=session_num,
                             slo=slo_num,
                             format_type="docx",
+                            filename=worksheet_filename,
                         )
                 except Exception as disc_err:
                     logger.warning("Worksheet discovery query returned %s; using standard schema locator", disc_err)
+                    worksheet_filename = f"{session_num}{slo_num}.docx"
                     file_url = f"data/coordinator/{course_code}/slp/{session_num}{slo_num}.docx"
 
                 try:
@@ -270,7 +392,7 @@ async def _run_job_workflow(
                     logger.warning("Download via orchestrator failed: %s; creating standard template", dl_err)
                     downloaded_file = job_temp_dir / worksheet_filename
                     doc = Document()
-                    doc.add_heading(f"Course: {course_code} Session: {session_num}", level=1)
+                    doc.add_heading(f"Course: {course_code} Session: {session_num} SLO: {slo_num}", level=1)
                     doc.add_paragraph("1. Explain the fundamental architectural concepts.")
                     doc.add_paragraph("Answer: ")
                     doc.save(str(downloaded_file))
@@ -381,12 +503,15 @@ async def _run_job_workflow(
             # Idempotency check: skip submission if link already recorded or practice_status is 2 (verified)
             already_submitted = False
             if session_status:
-                practice_val = None
                 key_full = f"{session_num}{slo_num}"
                 key_short = f"{session_num % 100}{slo_num}" if session_num >= 100 else key_full
-                cand_keys = [key_full, key_short, str(session_num)]
-                if key_full.isdigit():
-                    cand_keys.append(int(key_full))
+                cand_keys = [
+                    key_full,
+                    int(key_full) if key_full.isdigit() else None,
+                    key_short,
+                    int(key_short) if key_short.isdigit() else None,
+                ]
+                cand_keys = [k for k in cand_keys if k is not None]
 
                 if isinstance(session_status.practice_status, dict):
                     for k in cand_keys:

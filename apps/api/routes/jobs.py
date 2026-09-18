@@ -94,27 +94,40 @@ def create_job(job_in: JobCreate, db: Session = Depends(get_db)):
             detail=f"Failed to persist job record: {exc}",
         )
 
-    if job_in.credentials:
-        store_job_credentials(new_job.id, job_in.credentials)
+    creds = dict(job_in.credentials or {})
+    if job_in.session is not None:
+        creds["requested_session"] = job_in.session
+    if job_in.slo is not None:
+        creds["requested_slo"] = job_in.slo
+
+    if creds:
+        store_job_credentials(new_job.id, creds)
 
     # Dispatch to Celery background worker
     try:
-        process_job.delay(job_id=new_job.id, credentials=job_in.credentials)
+        process_job.delay(job_id=new_job.id, credentials=creds)
         logger.info("Job %s enqueued to Celery worker", new_job.id)
     except Exception as exc:
         logger.warning(
             "Could not dispatch to Celery broker (broker offline or eager mode disabled): %s",
             exc
         )
-        # In case Celery/Redis is temporarily offline during local dev without Docker,
-        # the job record remains created in PENDING state.
+        # Fallback to local eager execution when broker is offline/unreachable
+        try:
+            logger.info("Executing job %s eagerly via local fallback", new_job.id)
+            process_job.apply(args=[new_job.id], kwargs={"credentials": creds})
+        except Exception as fallback_exc:
+            logger.error("Local fallback execution failed for job %s: %s", new_job.id, fallback_exc)
 
+    db.expire_all()
+    db.refresh(new_job)
     return new_job
 
 
 @router.get("/{job_id}", response_model=JobResponse)
 def get_job(job_id: str, db: Session = Depends(get_db)):
     """Retrieve current status and details for an automation job."""
+    db.expire_all()
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(
@@ -189,8 +202,18 @@ def submit_captcha_solution(
         process_job.delay(job_id=job.id, credentials=cached_creds)
         logger.info("Resumed job %s with user-provided CAPTCHA", job.id)
     except Exception as exc:
-        logger.warning("Failed to re-dispatch resumed job to Celery: %s", exc)
+        logger.warning(
+            "Failed to re-dispatch resumed job to Celery: %s. Executing via local fallback.",
+            exc
+        )
+        try:
+            logger.info("Executing resumed job %s eagerly via local fallback", job.id)
+            process_job.apply(args=[job.id], kwargs={"credentials": cached_creds})
+        except Exception as fallback_exc:
+            logger.error("Local fallback execution failed for resumed job %s: %s", job.id, fallback_exc)
 
+    db.expire_all()
+    db.refresh(job)
     return job
 
 

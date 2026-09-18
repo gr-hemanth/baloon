@@ -559,9 +559,9 @@ class SRMHttpClient(SRMClient):
 
                     # Availability check against uploaded file registers
                     if fmt == "docx" and course_status.available_slp:
-                        is_avail = file_id in course_status.available_slp
+                        is_avail = file_id in course_status.available_slp or str(file_id) in [str(x) for x in course_status.available_slp]
                     elif fmt == "pdf" and course_status.available_slppdf:
-                        is_avail = file_id in course_status.available_slppdf
+                        is_avail = file_id in course_status.available_slppdf or str(file_id) in [str(x) for x in course_status.available_slppdf]
                     else:
                         is_avail = False
 
@@ -825,10 +825,10 @@ class SRMHttpClient(SRMClient):
 
         candidate_keys = [
             key_full,
-            key_short,
-            key_sess,
             int(key_full) if key_full.isdigit() else None,
+            key_short,
             int(key_short) if key_short.isdigit() else None,
+            key_sess,
             session,
         ]
         candidate_keys = [k for k in candidate_keys if k is not None]

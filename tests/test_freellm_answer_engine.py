@@ -553,3 +553,61 @@ async def test_worksheet_pipeline_with_freellm_engine(tmp_path: Path):
     assert result.completed_file.name == "completed_mcq_freellm.docx"
     assert result.answers.provider == "freellm"
     assert result.answers.total_count >= 4
+
+
+@pytest.mark.asyncio
+async def test_freellm_humanized_student_prompt_and_prohibitions():
+    """Verify FreeLLM system and user prompts enforce college-student persona and prohibit markdown artifacts."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    mock_client.post.return_value = _create_freellm_success_response([
+        {
+            "question_id": "q_1",
+            "question_number": "1",
+            "answer_text": "Central Processing Unit",
+            "selected_option": "A",
+            "confidence": 0.98,
+        }
+    ])
+
+    engine = LLMAnswerEngine(
+        provider="freellm",
+        api_key="mock-key",
+        http_client=mock_client,
+    )
+
+    ws = ParsedWorksheet(
+        filename="test.docx",
+        file_format="docx",
+        questions=[
+            ParsedQuestion(
+                question_id="q_1",
+                question_number="1",
+                question_type=QuestionType.MCQ,
+                question_text="What does CPU stand for?",
+                marks=1,
+            )
+        ],
+    )
+    await engine.generate_answers(ws)
+
+    mock_client.post.assert_called_once()
+    _, call_kwargs = mock_client.post.call_args
+    messages = call_kwargs["json"]["messages"]
+    system_msg = messages[0]["content"]
+    user_msg = messages[1]["content"]
+
+    # 1. Verify student persona enforcement
+    assert "college student" in system_msg.lower()
+    assert "professor" not in system_msg.lower()
+
+    # 2. Verify strict markdown prohibitions in prompt
+    assert "NO MARKDOWN" in system_msg
+    assert "###" in system_msg
+    assert "**" in system_msg
+    assert "*" in system_msg
+
+    # 3. Verify user prompt prohibitions
+    assert "NO markdown headers (###)" in user_msg
+    assert "NO bold text (**)" in user_msg
+    assert "NO bullet asterisks (*)" in user_msg
