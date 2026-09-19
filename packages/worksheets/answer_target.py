@@ -196,8 +196,13 @@ class AnswerTargetResolver:
                 is_explicit=True,
             )
 
-        # 2. Find question index if missing from source_location
-        if q_p_idx is None or q_p_idx >= len(doc.paragraphs):
+        # 2. Find question index if missing from source_location or shifted by earlier insertions
+        is_valid_p = (
+            q_p_idx is not None
+            and q_p_idx < len(doc.paragraphs)
+            and self._paragraph_matches_question(doc.paragraphs[q_p_idx], question)
+        )
+        if not is_valid_p:
             q_p_idx = self._find_question_paragraph_index(doc, question)
 
         if q_p_idx == -1:
@@ -207,14 +212,14 @@ class AnswerTargetResolver:
                 f"(number={question.question_number}). No writable target could be resolved."
             )
 
-        # Determine search window: from q_p_idx to next question's start index
+        # Determine search window: from q_p_idx to next question's start index in current document
         next_q_idx = len(doc.paragraphs)
         q_order = question.source_order
         for other_q in all_questions:
             if other_q.source_order > q_order:
-                other_p = other_q.source_location.get("paragraph_index")
-                if other_p is not None and other_p > q_p_idx and other_p < next_q_idx:
-                    next_q_idx = other_p
+                other_p = self._find_question_paragraph_index(doc, other_q)
+                if other_p != -1 and other_p > q_p_idx:
+                    next_q_idx = min(next_q_idx, other_p)
                     break
 
         # 3. Scan window for explicit placeholder, textbox, content control, or bordered box
@@ -388,27 +393,38 @@ class AnswerTargetResolver:
             is_explicit=False,
         )
 
-    def _find_question_paragraph_index(self, doc: docx.Document, question: ParsedQuestion) -> int:
-        """Find paragraph index matching question text and number."""
-        q_clean = question.question_text.splitlines()[0].strip()[:40].lower()
+    def _paragraph_matches_question(self, p: Paragraph, question: ParsedQuestion) -> bool:
+        """Check if a paragraph element in doc matches the question."""
+        p_text = p.text.strip().lower()
+        if not p_text:
+            return False
+        if p_text.startswith("answer:") or p_text.startswith("ans:") or p_text.startswith("solution:"):
+            return False
+
+        q_lines = [line.strip().lower() for line in question.question_text.splitlines() if line.strip()]
+        if not q_lines:
+            return False
+        q_clean = q_lines[0][:50]
+
+        if q_clean in p_text or p_text in q_clean:
+            return True
+
         q_num = question.question_number
+        if q_num:
+            patterns = [
+                f"{q_num}.", f"{q_num})", f"q{q_num}.", f"q{q_num}:",
+                f"activity {q_num}", f"activity {q_num}:"
+            ]
+            if any(p_text.startswith(pat) or f" {pat}" in p_text for pat in patterns):
+                if len(q_clean) < 15 or any(word in p_text for word in q_clean.split()[:4]):
+                    return True
 
+        return False
+
+    def _find_question_paragraph_index(self, doc: docx.Document, question: ParsedQuestion) -> int:
+        """Find paragraph index matching question text and number in current document state."""
         for idx, p in enumerate(doc.paragraphs):
-            p_text = p.text.strip().lower()
-            if not p_text:
-                continue
-
-            matches_num = False
-            if q_num:
-                patterns = [
-                    f"{q_num}.", f"{q_num})", f"q{q_num}.", f"q{q_num}:",
-                    f"activity {q_num}", f"activity {q_num}:"
-                ]
-                matches_num = any(p_text.startswith(pat) or f" {pat}" in p_text for pat in patterns)
-
-            if matches_num and (q_clean in p_text or len(q_clean) < 10):
-                return idx
-            if q_clean in p_text and len(q_clean) > 15:
+            if self._paragraph_matches_question(p, question):
                 return idx
 
         return -1
