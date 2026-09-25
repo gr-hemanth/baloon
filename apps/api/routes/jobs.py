@@ -185,6 +185,7 @@ def submit_captcha_solution(
 
     sol = sol.strip()
     job.captcha_solution = sol
+    job.captcha_challenge = None
     job.status = JobStatus.PENDING
     job.current_step = "captcha_submitted_resuming"
     db.commit()

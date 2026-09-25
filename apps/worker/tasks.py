@@ -425,8 +425,8 @@ async def _run_job_workflow(
 
             if completed_file is None:
                 if pipeline is None:
-                    # In production, use FreeLLMAPI with model routing set to default.
-                    provider = settings.WORKSHEET_ANSWER_PROVIDER or "freellm"
+                    # In production, use NVIDIA as primary provider with FreeLLM fallback.
+                    provider = settings.WORKSHEET_ANSWER_PROVIDER or "nvidia"
                     engine = AnswerEngineFactory.get_engine(
                         provider=provider,
                         allow_fallback_when_unconfigured=(settings.ENVIRONMENT == "test"),

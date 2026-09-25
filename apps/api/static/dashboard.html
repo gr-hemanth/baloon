@@ -36,6 +36,10 @@
 
     <!-- Integrations & Status Indicators -->
     <div class="flex items-center space-x-4 text-xs">
+      <div id="ai-provider-badge" class="flex items-center gap-2 px-3 py-1.5 rounded-md bg-slate-800 border border-slate-700">
+        <span class="h-2 w-2 rounded-full bg-emerald-400"></span>
+        <span class="text-slate-300">AI Provider: <strong id="ai-provider-name" class="text-emerald-400">NVIDIA</strong> <span id="ai-provider-hierarchy" class="text-[10px] text-slate-400 font-mono">(Primary → FreeLLM)</span></span>
+      </div>
       <div id="drive-status-badge" class="flex items-center gap-2 px-3 py-1.5 rounded-md bg-slate-800 border border-slate-700">
         <i class="fa-brands fa-google-drive text-amber-400"></i>
         <span>Google Drive:</span>
@@ -226,7 +230,7 @@
             <div class="step-item relative" data-step="PROCESSING">
               <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
               <div class="font-semibold text-xs text-slate-400 step-title">5. PROCESSING</div>
-              <div class="text-[11px] text-slate-500">Parsing questions, generating answers via FreeLLMAPI, creating separate completed file</div>
+              <div class="text-[11px] text-slate-500">Parsing questions, generating answers via NVIDIA (FreeLLM fallback), creating separate completed file</div>
             </div>
 
             <!-- 6. UPLOADING -->
@@ -328,9 +332,12 @@
         <i class="fa-solid fa-triangle-exclamation text-2xl"></i>
         <div>
           <h3 class="font-bold text-white text-base">CAPTCHA Challenge Required</h3>
-          <p class="text-xs text-slate-400">The SRM portal requires human CAPTCHA verification to proceed.</p>
+          <p id="captcha-modal-desc" class="text-xs text-slate-400">The SRM portal requires human CAPTCHA verification to proceed.</p>
         </div>
       </div>
+
+      <!-- CAPTCHA Error Display -->
+      <div id="captcha-modal-error" class="hidden p-3 rounded-lg bg-red-950/60 border border-red-800 text-red-200 text-xs"></div>
 
       <!-- CAPTCHA Image Container -->
       <div class="bg-slate-950 p-4 rounded-lg border border-slate-800 flex flex-col items-center justify-center gap-2">
@@ -351,11 +358,15 @@
             class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-center tracking-widest font-mono text-white placeholder-slate-600 focus:outline-none focus:border-amber-500 uppercase" />
         </div>
 
-        <div class="flex items-center justify-end gap-2 pt-2">
+        <div class="flex items-center gap-2 pt-2">
+          <button type="button" id="captcha-cancel-btn" onclick="cancelCaptchaModal()"
+            class="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition">
+            Cancel
+          </button>
           <button type="submit" id="captcha-submit-btn"
-            class="w-full py-2.5 px-4 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-sm flex items-center justify-center gap-2 shadow-lg shadow-amber-600/20 transition">
+            class="flex-1 py-2.5 px-4 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-sm flex items-center justify-center gap-2 shadow-lg shadow-amber-600/20 transition disabled:opacity-50">
             <i class="fa-solid fa-check"></i>
-            <span>Submit Solution & Resume Job</span>
+            <span id="captcha-submit-btn-text">Submit Solution</span>
           </button>
         </div>
       </form>
@@ -474,23 +485,48 @@
         }
 
         if (data.status === "WAITING_FOR_CAPTCHA") {
-          showCaptchaModal(data.captcha_challenge, (sol) => {
-            hideCaptchaModal();
-            // Re-run discovery with captcha solution
-            fetch("/api/v1/srm/discover", {
+          currentCaptchaContext = "discovery";
+          showCaptchaModal(data.captcha_challenge, async (sol) => {
+            let resumeRes = await fetch("/api/v1/srm/discover/resume", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ user_id: userId, password: password, semester: semester, transport_mode: transportMode, captcha_solution: sol }),
-            }).then(r => r.json()).then(res => {
-              hideCaptchaModal();
-              handleDiscoverySuccess(res);
-            }).catch(err => {
-              hideCaptchaModal();
-              msg.textContent = "Error: " + err.message;
-              msg.className = "mt-3 text-xs text-red-400";
-              msg.classList.remove("hidden");
+              body: JSON.stringify({
+                user_id: userId,
+                password: password,
+                semester: semester,
+                transport_mode: transportMode,
+                captcha_solution: sol,
+                solution: sol,
+              }),
             });
-          });
+            if (!resumeRes.ok && resumeRes.status === 404) {
+              resumeRes = await fetch("/api/v1/srm/discover", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  user_id: userId,
+                  password: password,
+                  semester: semester,
+                  transport_mode: transportMode,
+                  captcha_solution: sol,
+                  solution: sol,
+                }),
+              });
+            }
+            const resData = await resumeRes.json().catch(() => ({}));
+            if (!resumeRes.ok) {
+              throw new Error(resData.detail || "Authentication / Discovery failed");
+            }
+            if (resData.status === "WAITING_FOR_CAPTCHA") {
+              showCaptchaModal(resData.captcha_challenge, captchaResolver, "discovery");
+              showCaptchaError("Invalid CAPTCHA solution. Please try again with the new image.");
+              return false;
+            }
+            hideCaptchaModal();
+            currentCaptchaContext = null;
+            handleDiscoverySuccess(resData);
+            return true;
+          }, "discovery");
           return;
         }
 
@@ -668,9 +704,8 @@
         updateStepperUI(job.status, job.current_step);
 
         if (job.status === "WAITING_FOR_CAPTCHA") {
-          if (!isSubmittingCaptcha) {
+          if (currentCaptchaContext !== "discovery" && !isSubmittingCaptcha) {
             showCaptchaModal(job.captcha_challenge, async (sol) => {
-              hideCaptchaModal();
               try {
                 let resumeRes = await fetch(`/api/v1/jobs/${jobId}/resume`, {
                   method: "POST",
@@ -684,15 +719,25 @@
                     body: JSON.stringify({ solution: sol }),
                   });
                 }
+                const resData = await resumeRes.json().catch(() => ({}));
+                if (!resumeRes.ok) {
+                  throw new Error(resData.detail || "Failed to submit CAPTCHA solution");
+                }
                 hideCaptchaModal();
+                currentCaptchaContext = null;
                 await pollJobStatus(jobId);
+                return true;
               } catch (submitErr) {
-                alert("Failed to submit CAPTCHA solution: " + submitErr.message);
+                showCaptchaError(submitErr.message);
+                return false;
               }
-            });
+            }, "job");
           }
         } else {
-          hideCaptchaModal();
+          if (currentCaptchaContext === "job") {
+            hideCaptchaModal();
+            currentCaptchaContext = null;
+          }
         }
 
         if (job.status === "COMPLETED") {
@@ -788,14 +833,31 @@
     // CAPTCHA Modal
     let captchaResolver = null;
     let isSubmittingCaptcha = false;
+    let currentCaptchaContext = null;
 
-    function showCaptchaModal(challenge, resolver) {
+    function showCaptchaModal(challenge, resolver, context = "job") {
       if (isSubmittingCaptcha) return;
+      currentCaptchaContext = context;
       captchaResolver = resolver;
       const modal = document.getElementById("captcha-modal");
       const img = document.getElementById("captcha-image");
       const ph = document.getElementById("captcha-canvas-placeholder");
       const input = document.getElementById("captcha-solution-input");
+      const desc = document.getElementById("captcha-modal-desc");
+      const btnText = document.getElementById("captcha-submit-btn-text");
+
+      hideCaptchaError();
+
+      if (desc) {
+        desc.textContent = context === "discovery"
+          ? "Solve the portal challenge to authenticate & discover worksheets."
+          : "The SRM portal requires human CAPTCHA verification to proceed.";
+      }
+      if (btnText) {
+        btnText.textContent = context === "discovery"
+          ? "Submit Solution & Discover Courses"
+          : "Submit Solution & Resume Job";
+      }
 
       let b64 = null;
       if (challenge) {
@@ -830,12 +892,37 @@
       }
     }
 
+    function showCaptchaError(message) {
+      const errBox = document.getElementById("captcha-modal-error");
+      if (errBox) {
+        errBox.textContent = message || "An error occurred with the CAPTCHA solution.";
+        errBox.classList.remove("hidden");
+      }
+    }
+
+    function hideCaptchaError() {
+      const errBox = document.getElementById("captcha-modal-error");
+      if (errBox) {
+        errBox.textContent = "";
+        errBox.classList.add("hidden");
+      }
+    }
+
     function hideCaptchaModal() {
       const modal = document.getElementById("captcha-modal");
       if (modal) {
         modal.classList.add("hidden");
         modal.style.display = "none";
       }
+      hideCaptchaError();
+    }
+
+    function cancelCaptchaModal() {
+      hideCaptchaModal();
+      currentCaptchaContext = null;
+      isSubmittingCaptcha = false;
+      const btn = document.getElementById("captcha-submit-btn");
+      if (btn) btn.disabled = false;
     }
 
     async function submitCaptchaSolution(e) {
@@ -846,21 +933,39 @@
       if (!sol || isSubmittingCaptcha) return;
 
       isSubmittingCaptcha = true;
-      hideCaptchaModal();
+      hideCaptchaError();
 
       btn.disabled = true;
       btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Submitting Solution...`;
+
       try {
         if (captchaResolver) {
-          await captchaResolver(sol);
+          const success = await captchaResolver(sol);
+          if (success) {
+            hideCaptchaModal();
+            input.value = "";
+          }
         }
       } catch (err) {
-        alert("Failed to submit CAPTCHA: " + err.message);
-        showCaptchaModal(null, captchaResolver);
+        if (currentCaptchaContext === "discovery") {
+          hideCaptchaModal();
+          currentCaptchaContext = null;
+          const msg = document.getElementById("discovery-msg");
+          msg.textContent = "Discovery failed: " + err.message;
+          msg.className = "mt-3 text-xs text-red-400";
+          msg.classList.remove("hidden");
+        } else {
+          showCaptchaError("Failed to submit CAPTCHA: " + err.message);
+        }
       } finally {
         isSubmittingCaptcha = false;
         btn.disabled = false;
-        btn.innerHTML = `<i class="fa-solid fa-check"></i> <span>Submit Solution & Resume Job</span>`;
+        const btnText = document.getElementById("captcha-submit-btn-text");
+        if (btnText) {
+          btnText.textContent = currentCaptchaContext === "discovery"
+            ? "Submit Solution & Discover Courses"
+            : "Submit Solution & Resume Job";
+        }
       }
     }
 
@@ -892,12 +997,10 @@
     // Helper to determine if a job is genuinely active (not an orphaned/stale job)
     function isGenuinelyActive(job) {
       if (!job || !job.status) return false;
+      const ageMs = job.created_at ? (Date.now() - new Date(job.created_at).getTime()) : Infinity;
+      if (ageMs > 900000) return false; // Ignore jobs older than 15 minutes
       if (job.status === "WAITING_FOR_CAPTCHA" || job.status === "RUNNING") return true;
-      if (job.status === "PENDING") {
-        if (!job.created_at) return false;
-        const ageMs = Date.now() - new Date(job.created_at).getTime();
-        return ageMs >= 0 && ageMs < 180000; // Only consider PENDING active if created in the last 3 minutes
-      }
+      if (job.status === "PENDING") return ageMs < 180000;
       return false;
     }
 
@@ -942,7 +1045,26 @@
       }
     }
 
+    // Check active AI answer provider status
+    async function checkAIProviderStatus() {
+      try {
+        const res = await fetch("/api/v1/provider/status");
+        if (res.ok) {
+          const data = await res.json();
+          const primaryName = data.primary_provider ? data.primary_provider.toUpperCase() : "NVIDIA";
+          const fallbackName = data.fallback_provider ? data.fallback_provider.toUpperCase() : "FREELLM";
+          const nameEl = document.getElementById("ai-provider-name");
+          const hierEl = document.getElementById("ai-provider-hierarchy");
+          if (nameEl) nameEl.textContent = primaryName;
+          if (hierEl) hierEl.textContent = `(${primaryName} → ${fallbackName})`;
+        }
+      } catch (e) {
+        console.warn("Could not probe AI provider status:", e);
+      }
+    }
+
     // Initial check on page load
+    checkAIProviderStatus();
     checkDriveStatus();
     checkActiveJobOnLoad();
   </script>

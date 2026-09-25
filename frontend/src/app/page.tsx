@@ -5,6 +5,7 @@ import {
   checkDriveStatus,
   getDriveAuthUrl,
   discoverSRMCourses,
+  resumeSRMDiscovery,
   createJob,
   getJob,
   submitCaptchaSolution,
@@ -18,7 +19,7 @@ const PIPELINE_STEPS = [
   { key: "RUNNING", title: "2. RUNNING", desc: "Worker initialized, connecting to SRM" },
   { key: "WAITING_FOR_CAPTCHA", title: "3. WAITING_FOR_CAPTCHA", desc: "Paused if portal presents CAPTCHA" },
   { key: "DOWNLOADING", title: "4. DOWNLOADING", desc: "Downloading worksheet document" },
-  { key: "PROCESSING", title: "5. PROCESSING", desc: "Parsing & answering via FreeLLMAPI" },
+  { key: "PROCESSING", title: "5. PROCESSING", desc: "Parsing & answering via NVIDIA (FreeLLM fallback)" },
   { key: "UPLOADING", title: "6. UPLOADING", desc: "Storing in Google Drive (Anyone with link / Viewer)" },
   { key: "SUBMITTING", title: "7. SUBMITTING", desc: "Submitting verified link to SRM portal" },
   { key: "VERIFYING", title: "8. VERIFYING", desc: "Confirming portal practice status update" },
@@ -49,8 +50,10 @@ export default function DashboardPage() {
 
   // CAPTCHA Modal State
   const [showCaptcha, setShowCaptcha] = useState(false);
+  const [captchaContext, setCaptchaContext] = useState<"discovery" | "job" | null>(null);
   const [captchaChallenge, setCaptchaChallenge] = useState<any>(null);
   const [captchaSolution, setCaptchaSolution] = useState("");
+  const [captchaError, setCaptchaError] = useState<string | null>(null);
   const [isSubmittingCaptcha, setIsSubmittingCaptcha] = useState(false);
 
   // Load Google Drive Status on Mount
@@ -81,10 +84,14 @@ export default function DashboardPage() {
     e.preventDefault();
     setIsDiscovering(true);
     setDiscoveryError(null);
+    setCaptchaError(null);
     try {
       const resp = await discoverSRMCourses(userId, password, semester, undefined, transportMode);
       if (resp.status === "WAITING_FOR_CAPTCHA") {
+        setCaptchaContext("discovery");
         setCaptchaChallenge(resp.captcha_challenge);
+        setCaptchaSolution("");
+        setCaptchaError(null);
         setShowCaptcha(true);
         return;
       }
@@ -117,6 +124,13 @@ export default function DashboardPage() {
         credentials: { USER_ID: userId, PASSWORD: password },
       });
       setActiveJob(job);
+      if (job.status === "WAITING_FOR_CAPTCHA") {
+        setCaptchaContext("job");
+        setCaptchaChallenge(job.captcha_challenge);
+        setCaptchaSolution("");
+        setCaptchaError(null);
+        setShowCaptcha(true);
+      }
     } catch (err: any) {
       if (err.status === 409 && err.existingJobId) {
         alert("Notice: " + err.message);
@@ -143,10 +157,15 @@ export default function DashboardPage() {
         setActiveJob(updated);
 
         if (updated.status === "WAITING_FOR_CAPTCHA") {
-          setCaptchaChallenge(updated.captcha_challenge);
-          setShowCaptcha(true);
-        } else {
+          if (captchaContext !== "discovery" && !isSubmittingCaptcha) {
+            setCaptchaContext("job");
+            setCaptchaChallenge(updated.captcha_challenge);
+            setShowCaptcha(true);
+          }
+        } else if (captchaContext === "job") {
           setShowCaptcha(false);
+          setCaptchaChallenge(null);
+          setCaptchaContext(null);
         }
       } catch (e) {
         console.warn("Poll failed:", e);
@@ -154,20 +173,52 @@ export default function DashboardPage() {
     }, 1500);
 
     return () => clearInterval(timer);
-  }, [activeJob]);
+  }, [activeJob, captchaContext, isSubmittingCaptcha]);
 
   // Submit CAPTCHA
   const handleCaptchaSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeJob || !captchaSolution) return;
+    const sol = captchaSolution.trim();
+    if (!sol || isSubmittingCaptcha) return;
+
     setIsSubmittingCaptcha(true);
+    setCaptchaError(null);
+
     try {
-      const updated = await submitCaptchaSolution(activeJob.id, captchaSolution);
-      setActiveJob(updated);
-      setShowCaptcha(false);
-      setCaptchaSolution("");
+      if (captchaContext === "discovery") {
+        const resp = await resumeSRMDiscovery(userId, password, sol, semester, transportMode);
+        if (resp.status === "WAITING_FOR_CAPTCHA") {
+          setCaptchaChallenge(resp.captcha_challenge);
+          setCaptchaSolution("");
+          setCaptchaError("Invalid CAPTCHA solution. Please solve the new challenge below.");
+          return;
+        }
+        setShowCaptcha(false);
+        setCaptchaChallenge(null);
+        setCaptchaSolution("");
+        setCaptchaContext(null);
+        setCourses(resp.courses);
+        if (resp.courses.length > 0) {
+          setSelectedCourseCode(resp.courses[0].course_code);
+        }
+      } else if (captchaContext === "job" && activeJob) {
+        const updated = await submitCaptchaSolution(activeJob.id, sol);
+        setActiveJob(updated);
+        setShowCaptcha(false);
+        setCaptchaChallenge(null);
+        setCaptchaSolution("");
+        setCaptchaContext(null);
+      }
     } catch (err: any) {
-      alert("Failed to submit CAPTCHA: " + err.message);
+      if (captchaContext === "discovery") {
+        setShowCaptcha(false);
+        setCaptchaChallenge(null);
+        setCaptchaSolution("");
+        setCaptchaContext(null);
+        setDiscoveryError(err.message);
+      } else {
+        setCaptchaError(err.message);
+      }
     } finally {
       setIsSubmittingCaptcha(false);
     }
@@ -553,9 +604,19 @@ export default function DashboardPage() {
               <span className="text-2xl">⚠️</span>
               <div>
                 <h3 className="font-bold text-white text-base">CAPTCHA Required</h3>
-                <p className="text-xs text-slate-400">Solve the portal challenge to resume background processing.</p>
+                <p className="text-xs text-slate-400">
+                  {captchaContext === "discovery"
+                    ? "Solve the portal challenge to authenticate & discover worksheets."
+                    : "Solve the portal challenge to resume background processing."}
+                </p>
               </div>
             </div>
+
+            {captchaError && (
+              <div className="p-3 rounded-lg bg-red-950/60 border border-red-800 text-red-200 text-xs">
+                {captchaError}
+              </div>
+            )}
 
             {captchaChallenge?.image_base64 && (
               <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 flex justify-center">
@@ -577,6 +638,7 @@ export default function DashboardPage() {
                 <input
                   type="text"
                   required
+                  autoFocus
                   value={captchaSolution}
                   onChange={(e) => setCaptchaSolution(e.target.value.toUpperCase())}
                   placeholder="e.g. 48B92"
@@ -584,13 +646,33 @@ export default function DashboardPage() {
                 />
               </div>
 
-              <button
-                type="submit"
-                disabled={isSubmittingCaptcha}
-                className="w-full py-2.5 px-4 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-sm transition"
-              >
-                {isSubmittingCaptcha ? "Submitting Solution..." : "Submit Solution & Resume Job"}
-              </button>
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={isSubmittingCaptcha}
+                  onClick={() => {
+                    setShowCaptcha(false);
+                    setCaptchaChallenge(null);
+                    setCaptchaSolution("");
+                    setCaptchaContext(null);
+                    setCaptchaError(null);
+                  }}
+                  className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingCaptcha || !captchaSolution.trim()}
+                  className="flex-1 py-2.5 px-4 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-sm transition disabled:opacity-50"
+                >
+                  {isSubmittingCaptcha
+                    ? "Submitting Solution..."
+                    : captchaContext === "discovery"
+                    ? "Submit Solution & Discover Courses"
+                    : "Submit Solution & Resume Job"}
+                </button>
+              </div>
             </form>
           </div>
         </div>

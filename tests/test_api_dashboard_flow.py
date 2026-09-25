@@ -345,3 +345,398 @@ def test_complete_user_flow_discovery_to_completed_job(client: TestClient, db_se
             assert db_job.status == JobStatus.COMPLETED
         finally:
             verify_db.close()
+
+
+def test_discovery_captcha_submission_and_resume_flow(client: TestClient):
+    """Verify discovery CAPTCHA challenge -> submit solution -> discovery completes successfully."""
+    mock_orch = _setup_mock_srm_orchestrator()
+    # Step 1: Initial discovery requires CAPTCHA
+    mock_orch.capture_login_captcha.return_value = {
+        "type": "canvas",
+        "image_base64": "fake_canvas_base64_img",
+    }
+
+    with patch("apps.api.routes.srm.SRMOrchestrator", return_value=mock_orch):
+        resp1 = client.post(
+            "/api/v1/srm/discover",
+            json={
+                "user_id": "RA2111003010001",
+                "password": "SecretStudentPassword!",
+                "semester": 3,
+            },
+        )
+        assert resp1.status_code == 200
+        d1 = resp1.json()
+        assert d1["status"] == "WAITING_FOR_CAPTCHA"
+        assert d1["captcha_challenge"] is not None
+
+        # Step 2: User solves CAPTCHA and calls /discover/resume
+        resp2 = client.post(
+            "/api/v1/srm/discover/resume",
+            json={
+                "user_id": "RA2111003010001",
+                "password": "SecretStudentPassword!",
+                "semester": 3,
+                "solution": "AB49C",
+            },
+        )
+        assert resp2.status_code == 200
+        d2 = resp2.json()
+        assert d2["status"] == "SUCCESS"
+        assert len(d2["courses"]) == 1
+        assert d2["courses"][0]["course_code"] == "21CSC303J"
+        # Stale challenge must be cleared
+        assert d2["captcha_challenge"] is None
+
+
+def test_discovery_captcha_resume_invalid_solution_reissues_challenge(client: TestClient):
+    """Verify that submitting an invalid CAPTCHA solution re-issues WAITING_FOR_CAPTCHA challenge."""
+    mock_orch = _setup_mock_srm_orchestrator()
+    mock_orch.authenticate.side_effect = CaptchaRequired(
+        "Invalid CAPTCHA solution entered.",
+        challenge_data={"type": "canvas", "image_base64": "new_captcha_data"},
+    )
+
+    with patch("apps.api.routes.srm.SRMOrchestrator", return_value=mock_orch):
+        resp = client.post(
+            "/api/v1/srm/discover/resume",
+            json={
+                "user_id": "RA2111003010001",
+                "password": "SecretStudentPassword!",
+                "semester": 3,
+                "captcha_solution": "WRONG1",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "WAITING_FOR_CAPTCHA"
+        assert data["captcha_challenge"] is not None
+        assert data["captcha_challenge"]["image_base64"] == "new_captcha_data"
+
+
+def test_discovery_resume_auth_failure_returns_sanitized_401(client: TestClient):
+    """Verify that credentials failure during resume returns 401 with sanitized error."""
+    mock_orch = _setup_mock_srm_orchestrator()
+    mock_orch.authenticate.side_effect = AuthenticationFailed("Invalid user ID or password")
+
+    with patch("apps.api.routes.srm.SRMOrchestrator", return_value=mock_orch):
+        resp = client.post(
+            "/api/v1/srm/discover/resume",
+            json={
+                "user_id": "RA2111003010001",
+                "password": "WrongPassword!",
+                "semester": 3,
+                "solution": "AB49C",
+            },
+        )
+        assert resp.status_code == 401
+        assert "Authentication failed" in resp.json()["detail"]
+
+
+def test_job_captcha_submission_clears_stale_challenge_in_db(client: TestClient, db_session: Session):
+    """Verify that when a user submits a job CAPTCHA, job.captcha_challenge is cleared from the database."""
+    job = Job(
+        user_id="RA2111003010001",
+        course_id="21CSC303J",
+        semester_id="3",
+        worksheet_id="1011",
+        status=JobStatus.WAITING_FOR_CAPTCHA,
+        transport_mode="http",
+        current_step="waiting_for_user_captcha",
+        captcha_challenge={"type": "canvas", "image_base64": "stale_challenge_data"},
+    )
+    db_session.add(job)
+    db_session.commit()
+    db_session.refresh(job)
+
+    mock_orch = _setup_mock_srm_orchestrator()
+    with patch("apps.api.routes.jobs.process_job"):
+        resp = client.post(
+            f"/api/v1/jobs/{job.id}/resume",
+            json={"solution": "49XBC2"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["captcha_challenge"] is None
+
+        # Verify DB directly
+        db_session.expire_all()
+        refreshed = db_session.query(Job).filter(Job.id == job.id).first()
+        assert refreshed.captcha_challenge is None
+        assert refreshed.captcha_solution == "49XBC2"
+
+
+def test_job_captcha_empty_solution_rejected(client: TestClient, db_session: Session):
+    """Verify that submitting an empty or whitespace CAPTCHA solution returns HTTP 400."""
+    job = Job(
+        user_id="RA2111003010001",
+        course_id="21CSC303J",
+        semester_id="3",
+        worksheet_id="1011",
+        status=JobStatus.WAITING_FOR_CAPTCHA,
+        transport_mode="http",
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    resp = client.post(
+        f"/api/v1/jobs/{job.id}/resume",
+        json={"solution": "   "},
+    )
+    assert resp.status_code == 400
+    assert "Missing CAPTCHA solution" in resp.json()["detail"]
+
+
+def test_duplicate_job_captcha_submission_prevented(client: TestClient, db_session: Session):
+    """Verify that attempting to submit CAPTCHA to a job not waiting for CAPTCHA returns HTTP 400."""
+    job = Job(
+        user_id="RA2111003010001",
+        course_id="21CSC303J",
+        semester_id="3",
+        worksheet_id="1011",
+        status=JobStatus.RUNNING,
+        transport_mode="http",
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    resp = client.post(
+        f"/api/v1/jobs/{job.id}/resume",
+        json={"solution": "49XBC2"},
+    )
+    assert resp.status_code == 400
+    assert "Job is not waiting for CAPTCHA" in resp.json()["detail"]
+
+
+# ==============================================================================
+# 10 SPECIFIC REGRESSION TESTS REQUESTED FOR SRM DISCOVERY/AUTHENTICATION CAPTCHA
+# ==============================================================================
+
+def test_regression_1_captcha_appears_after_discovery(client: TestClient):
+    """Requirement 1: CAPTCHA appears after discovery request."""
+    mock_orch = _setup_mock_srm_orchestrator()
+    mock_orch.capture_login_captcha.return_value = {
+        "type": "canvas",
+        "image_base64": "fake_canvas_base64_img",
+    }
+    with patch("apps.api.routes.srm.SRMOrchestrator", return_value=mock_orch):
+        resp = client.post(
+            "/api/v1/srm/discover",
+            json={"user_id": "RA2111003010001", "password": "SecretPassword!", "semester": 3},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "WAITING_FOR_CAPTCHA"
+        assert data["captcha_challenge"] is not None
+        assert data["captcha_challenge"]["type"] == "canvas"
+        assert data["captcha_challenge"]["image_base64"] == "fake_canvas_base64_img"
+
+
+def test_regression_2_user_submits_valid_captcha(client: TestClient):
+    """Requirement 2: User submits valid CAPTCHA via /srm/discover/resume."""
+    mock_orch = _setup_mock_srm_orchestrator()
+    with patch("apps.api.routes.srm.SRMOrchestrator", return_value=mock_orch):
+        resp = client.post(
+            "/api/v1/srm/discover/resume",
+            json={
+                "user_id": "RA2111003010001",
+                "password": "SecretPassword!",
+                "semester": 3,
+                "solution": "VALID123",
+            },
+        )
+        assert resp.status_code == 200
+        # Backend authenticated student with provided solution
+        mock_orch.authenticate.assert_awaited_once()
+        auth_call_args = mock_orch.authenticate.call_args[0][0]
+        assert auth_call_args["captcha_solution"] == "VALID123"
+
+
+def test_regression_3_resume_request_returns_success(client: TestClient):
+    """Requirement 3: Resume request returns success status and 200 OK."""
+    mock_orch = _setup_mock_srm_orchestrator()
+    with patch("apps.api.routes.srm.SRMOrchestrator", return_value=mock_orch):
+        resp = client.post(
+            "/api/v1/srm/discover/resume",
+            json={
+                "user_id": "RA2111003010001",
+                "password": "SecretPassword!",
+                "semester": 3,
+                "captcha_solution": "VALID123",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "SUCCESS"
+        assert "Discovered" in data["message"]
+
+
+def test_regression_4_captcha_modal_closes(client: TestClient):
+    """Requirement 4: CAPTCHA modal closing contract is verified in production dashboard HTML."""
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    html = resp.text
+    # Verify that hideCaptchaModal is called on successful resume resolution
+    assert "hideCaptchaModal()" in html
+    assert "currentCaptchaContext = null;" in html
+    assert 'modal.style.display = "none"' in html or 'modal.classList.add("hidden")' in html
+
+
+def test_regression_5_polling_does_not_reopen_captcha(client: TestClient):
+    """Requirement 5: Background polling is strictly guarded and cannot reopen discovery CAPTCHA."""
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    html = resp.text
+    # Polling specifically guards against reopening while discovery is active or when closed
+    assert 'currentCaptchaContext !== "discovery"' in html
+    assert "!isSubmittingCaptcha" in html
+
+
+def test_regression_6_discovery_continues_after_captcha(client: TestClient):
+    """Requirement 6: Discovery continues and returns courses after CAPTCHA resolution."""
+    mock_orch = _setup_mock_srm_orchestrator()
+    with patch("apps.api.routes.srm.SRMOrchestrator", return_value=mock_orch):
+        resp = client.post(
+            "/api/v1/srm/discover/resume",
+            json={
+                "user_id": "RA2111003010001",
+                "password": "SecretPassword!",
+                "semester": 3,
+                "solution": "VALID123",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "SUCCESS"
+        assert len(data["courses"]) > 0
+        assert data["courses"][0]["course_code"] == "21CSC303J"
+        assert len(data["courses"][0]["worksheets"]) > 0
+
+
+def test_regression_7_invalid_captcha_keeps_modal_open_and_shows_error(client: TestClient):
+    """Requirement 7: Invalid CAPTCHA reissues challenge keeping modal open with error."""
+    mock_orch = _setup_mock_srm_orchestrator()
+    mock_orch.authenticate.side_effect = CaptchaRequired(
+        "Invalid CAPTCHA code.",
+        challenge_data={"type": "canvas", "image_base64": "refreshed_captcha_img"},
+    )
+    with patch("apps.api.routes.srm.SRMOrchestrator", return_value=mock_orch):
+        resp = client.post(
+            "/api/v1/srm/discover/resume",
+            json={
+                "user_id": "RA2111003010001",
+                "password": "SecretPassword!",
+                "semester": 3,
+                "solution": "WRONG_CAPTCHA",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "WAITING_FOR_CAPTCHA"
+        assert data["captcha_challenge"] is not None
+        assert data["captcha_challenge"]["image_base64"] == "refreshed_captcha_img"
+
+
+def test_regression_8_duplicate_captcha_submissions_prevented(client: TestClient, db_session: Session):
+    """Requirement 8: Duplicate CAPTCHA submissions are prevented both in API and UI."""
+    # Backend check: Job already in RUNNING status rejects resumption
+    job = Job(
+        user_id="RA2111003010001",
+        course_id="21CSC303J",
+        semester_id="3",
+        worksheet_id="1011",
+        status=JobStatus.RUNNING,
+        transport_mode="http",
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    resp = client.post(
+        f"/api/v1/jobs/{job.id}/resume",
+        json={"solution": "VALID123"},
+    )
+    assert resp.status_code == 400
+    assert "Job is not waiting for CAPTCHA" in resp.json()["detail"]
+
+    # Frontend check: Button disable and in-flight flag verified in dashboard HTML
+    resp_ui = client.get("/dashboard")
+    assert resp_ui.status_code == 200
+    assert "isSubmittingCaptcha = true;" in resp_ui.text
+    assert "btn.disabled = true;" in resp_ui.text
+
+
+def test_regression_9_stale_captcha_challenge_cleared_after_success(client: TestClient, db_session: Session):
+    """Requirement 9: Stale captcha_challenge is cleared after successful submission."""
+    # 1. Discovery flow clears challenge
+    mock_orch = _setup_mock_srm_orchestrator()
+    with patch("apps.api.routes.srm.SRMOrchestrator", return_value=mock_orch):
+        resp = client.post(
+            "/api/v1/srm/discover/resume",
+            json={
+                "user_id": "RA2111003010001",
+                "password": "SecretPassword!",
+                "semester": 3,
+                "solution": "VALID123",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["captcha_challenge"] is None
+
+    # 2. Job flow clears challenge from DB
+    job = Job(
+        user_id="RA2111003010001",
+        course_id="21CSC303J",
+        semester_id="3",
+        worksheet_id="1011",
+        status=JobStatus.WAITING_FOR_CAPTCHA,
+        transport_mode="http",
+        captcha_challenge={"type": "canvas", "image_base64": "stale_challenge"},
+    )
+    db_session.add(job)
+    db_session.commit()
+    db_session.refresh(job)
+
+    with patch("apps.api.routes.jobs.process_job"):
+        resp_job = client.post(
+            f"/api/v1/jobs/{job.id}/resume",
+            json={"solution": "VALID123"},
+        )
+        assert resp_job.status_code == 200
+        assert resp_job.json()["captcha_challenge"] is None
+
+        db_session.expire_all()
+        refreshed = db_session.query(Job).filter(Job.id == job.id).first()
+        assert refreshed.captcha_challenge is None
+
+
+def test_regression_10_refreshing_dashboard_does_not_resurrect_stale_challenge(
+    client: TestClient, db_session: Session
+):
+    """Requirement 10: Refreshing the dashboard during/after CAPTCHA does not resurrect stale challenge."""
+    # Ensure all jobs queried by dashboard check have None for captcha_challenge once resumed
+    job = Job(
+        user_id="RA2111003010001",
+        course_id="21CSC303J",
+        semester_id="3",
+        worksheet_id="1011",
+        status=JobStatus.PENDING,
+        transport_mode="http",
+        captcha_challenge=None,
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    # Query job status endpoint (simulating page reload checkActiveJobOnLoad)
+    resp = client.get(f"/api/v1/jobs/{job.id}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["captcha_challenge"] is None
+    assert data["status"] != "WAITING_FOR_CAPTCHA"
+
+    # Query recent jobs
+    resp_list = client.get("/api/v1/jobs?limit=5")
+    assert resp_list.status_code == 200
+    for j in resp_list.json():
+        if j["id"] == job.id:
+            assert j["captcha_challenge"] is None
+

@@ -24,6 +24,7 @@ router = APIRouter(prefix="/srm", tags=["SRM Discovery"])
 
 
 @router.post("/discover", response_model=SRMDiscoverResponse)
+@router.post("/discover/resume", response_model=SRMDiscoverResponse)
 async def discover_srm_courses(req: SRMDiscoverRequest) -> SRMDiscoverResponse:
     """Authenticate with SRM and discover Semester 3 courses and available worksheets.
 
@@ -31,6 +32,7 @@ async def discover_srm_courses(req: SRMDiscoverRequest) -> SRMDiscoverResponse:
     - Never persists password in database or on disk.
     - Wipes credentials upon completion.
     - Returns CAPTCHA challenge if portal requires challenge resolution.
+    - Mounts on both /discover and /discover/resume for seamless UI resumption.
     """
     if not req.user_id or not req.password:
         raise HTTPException(
@@ -41,12 +43,13 @@ async def discover_srm_courses(req: SRMDiscoverRequest) -> SRMDiscoverResponse:
     target_sem = req.semester or 3
     transport_mode = getattr(req, "transport_mode", "auto") or "auto"
     orchestrator = SRMOrchestrator(mode=transport_mode)
+    captcha_sol = req.effective_solution
 
     try:
         await orchestrator.connect()
 
         # Check if CAPTCHA is presented by portal
-        if not req.captcha_solution:
+        if not captcha_sol:
             captcha_challenge = await orchestrator.capture_login_captcha()
             if captcha_challenge:
                 return SRMDiscoverResponse(
@@ -60,8 +63,8 @@ async def discover_srm_courses(req: SRMDiscoverRequest) -> SRMDiscoverResponse:
         credentials = {
             "USER_ID": req.user_id,
             "PASSWORD": req.password,
-            "captcha_solution": req.captcha_solution,
-            "captcha": req.captcha_solution,
+            "captcha_solution": captcha_sol,
+            "captcha": captcha_sol,
         }
 
         try:
@@ -128,6 +131,7 @@ async def discover_srm_courses(req: SRMDiscoverRequest) -> SRMDiscoverResponse:
             message=f"Discovered {len(course_items)} courses for Semester {target_sem}.",
             semester=target_sem,
             courses=course_items,
+            captcha_challenge=None,
         )
 
     except HTTPException:

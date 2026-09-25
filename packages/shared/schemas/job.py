@@ -22,7 +22,12 @@ class SRMDiscoverRequest(BaseModel):
     password: str
     semester: Optional[int] = 3
     captcha_solution: Optional[str] = None
+    solution: Optional[str] = None
     transport_mode: Optional[str] = "auto"
+
+    @property
+    def effective_solution(self) -> Optional[str]:
+        return self.captcha_solution or self.solution
 
 
 class SRMWorksheetItem(BaseModel):

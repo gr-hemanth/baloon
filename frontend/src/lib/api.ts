@@ -97,9 +97,50 @@ export async function discoverSRMCourses(
       password: pass,
       semester: sem,
       captcha_solution: captchaSolution,
+      solution: captchaSolution,
       transport_mode: transportMode,
     }),
   });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || "Authentication / Discovery failed");
+  }
+  return res.json();
+}
+
+export async function resumeSRMDiscovery(
+  userId: string,
+  pass: string,
+  solution: string,
+  sem: number = 3,
+  transportMode: string = "auto"
+): Promise<SRMDiscoverResponse> {
+  let res = await fetch(`${API_BASE}/srm/discover/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: userId,
+      password: pass,
+      semester: sem,
+      captcha_solution: solution,
+      solution: solution,
+      transport_mode: transportMode,
+    }),
+  });
+  if (!res.ok && res.status === 404) {
+    res = await fetch(`${API_BASE}/srm/discover`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: userId,
+        password: pass,
+        semester: sem,
+        captcha_solution: solution,
+        solution: solution,
+        transport_mode: transportMode,
+      }),
+    });
+  }
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || "Authentication / Discovery failed");
