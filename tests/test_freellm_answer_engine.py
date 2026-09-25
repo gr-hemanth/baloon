@@ -30,8 +30,13 @@ from packages.worksheets.answer_engine import (
     LLMAnswerEngine,
     RuleBasedAnswerEngine,
 )
-from packages.worksheets.answer_models import AnswerStatus
+from packages.worksheets.answer_models import (
+    AnswerStatus,
+    GeneratedAnswer,
+    WorksheetAnswers,
+)
 from packages.worksheets.exceptions import (
+    AnswerEngineError,
     LLMAuthenticationError,
     LLMNetworkError,
     LLMRateLimitError,
@@ -611,3 +616,310 @@ async def test_freellm_humanized_student_prompt_and_prohibitions():
     assert "NO markdown headers (###)" in user_msg
     assert "NO bold text (**)" in user_msg
     assert "NO bullet asterisks (*)" in user_msg
+
+
+# ==============================================================================
+# ROBUST PROVIDER HANDLING & NVIDIA FALLBACK TESTS
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_freellm_succeeds_no_nvidia_call():
+    """Verify that when FreeLLM succeeds, fallback NVIDIA engine is never invoked."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    mock_client.post.return_value = _create_freellm_success_response([
+        {"question_id": "q_1", "question_number": "1", "answer_text": "Central Processing Unit", "selected_option": "A", "confidence": 0.99},
+        {"question_id": "q_2", "question_number": "2", "answer_text": "Stack", "confidence": 0.95},
+        {"question_id": "q_3", "question_number": "3", "answer_text": "A process has isolated memory whereas threads share memory.", "confidence": 0.95},
+        {"question_id": "q_4", "question_number": "4", "answer_text": "Raft is a consensus algorithm that elects a leader.", "confidence": 0.90},
+    ])
+
+    mock_nvidia = AsyncMock(spec=LLMAnswerEngine)
+    mock_nvidia.provider = "nvidia"
+
+    engine = LLMAnswerEngine(
+        provider="freellm",
+        api_key="valid-freellm-key",
+        fallback_engine=mock_nvidia,
+        http_client=mock_client,
+    )
+
+    ws = _create_sample_parsed_worksheet()
+    result = await engine.generate_answers(ws)
+
+    assert result.provider == "freellm"
+    assert len(result.answers) == 4
+    mock_client.post.assert_called_once()
+    mock_nvidia.generate_answers.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_freellm_times_out_and_retries_successfully():
+    """Verify FreeLLM times out on attempt 1, retries, and succeeds on attempt 2 without calling NVIDIA."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+
+    success_resp = _create_freellm_success_response([
+        {"question_id": "q_1", "question_number": "1", "answer_text": "Central Processing Unit", "selected_option": "A", "confidence": 0.99},
+        {"question_id": "q_2", "question_number": "2", "answer_text": "Stack", "confidence": 0.95},
+        {"question_id": "q_3", "question_number": "3", "answer_text": "Process vs Thread", "confidence": 0.95},
+        {"question_id": "q_4", "question_number": "4", "answer_text": "Raft consensus", "confidence": 0.90},
+    ])
+    mock_client.post.side_effect = [
+        httpx.TimeoutException("Read timed out after 60.0s"),
+        success_resp,
+    ]
+
+    mock_nvidia = AsyncMock(spec=LLMAnswerEngine)
+    mock_nvidia.provider = "nvidia"
+
+    engine = LLMAnswerEngine(
+        provider="freellm",
+        api_key="valid-freellm-key",
+        max_retries=2,
+        retry_backoff=0.001,
+        fallback_engine=mock_nvidia,
+        http_client=mock_client,
+    )
+
+    ws = _create_sample_parsed_worksheet()
+    result = await engine.generate_answers(ws)
+
+    assert result.provider == "freellm"
+    assert len(result.answers) == 4
+    assert mock_client.post.call_count == 2
+    mock_nvidia.generate_answers.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_freellm_still_times_out_nvidia_fallback():
+    """Verify FreeLLM times out on all attempts, then automatically falls back to NVIDIA and succeeds."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    mock_client.post.side_effect = httpx.TimeoutException("FREELLM API request timed out after 60.0s")
+
+    mock_nvidia = AsyncMock(spec=LLMAnswerEngine)
+    mock_nvidia.provider = "nvidia"
+    ws = _create_sample_parsed_worksheet()
+    fallback_answers = [
+        GeneratedAnswer(question_id=q.question_id, question_number=q.question_number, question_type=q.question_type, answer_text=f"NVIDIA answer for {q.question_id}", confidence=0.95, status=AnswerStatus.SUCCESS)
+        for q in ws.questions
+    ]
+    mock_nvidia.generate_answers.return_value = WorksheetAnswers(
+        worksheet_filename=ws.filename,
+        answers=fallback_answers,
+        provider="nvidia",
+        metadata={"model": "meta/llama-3.3-70b-instruct"},
+    )
+
+    engine = LLMAnswerEngine(
+        provider="freellm",
+        api_key="valid-freellm-key",
+        max_retries=1,
+        retry_backoff=0.001,
+        fallback_engine=mock_nvidia,
+        http_client=mock_client,
+    )
+
+    result = await engine.generate_answers(ws)
+
+    assert result.provider == "nvidia"
+    assert len(result.answers) == 4
+    assert mock_client.post.call_count == 2  # initial + 1 retry
+    mock_nvidia.generate_answers.assert_called_once()
+    assert result.answers[0].answer_text == "NVIDIA answer for q_1"
+
+
+@pytest.mark.asyncio
+async def test_freellm_connection_failure_nvidia_fallback():
+    """Verify FreeLLM connection error automatically falls back to NVIDIA and succeeds."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    mock_client.post.side_effect = httpx.ConnectError("Connection refused to 127.0.0.1:31415")
+
+    mock_nvidia = AsyncMock(spec=LLMAnswerEngine)
+    mock_nvidia.provider = "nvidia"
+    ws = _create_sample_parsed_worksheet()
+    fallback_answers = [
+        GeneratedAnswer(question_id=q.question_id, question_number=q.question_number, question_type=q.question_type, answer_text=f"NVIDIA answer for {q.question_id}", confidence=0.95, status=AnswerStatus.SUCCESS)
+        for q in ws.questions
+    ]
+    mock_nvidia.generate_answers.return_value = WorksheetAnswers(
+        worksheet_filename=ws.filename,
+        answers=fallback_answers,
+        provider="nvidia",
+    )
+
+    engine = LLMAnswerEngine(
+        provider="freellm",
+        api_key="valid-freellm-key",
+        max_retries=1,
+        retry_backoff=0.001,
+        fallback_engine=mock_nvidia,
+        http_client=mock_client,
+    )
+
+    result = await engine.generate_answers(ws)
+
+    assert result.provider == "nvidia"
+    assert len(result.answers) == 4
+    mock_nvidia.generate_answers.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_both_providers_fail_clean_failed_state():
+    """Verify that when both FreeLLM and fallback NVIDIA fail, a clean AnswerEngineError is raised with useful details."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    mock_client.post.side_effect = httpx.TimeoutException("FREELLM API request timed out after 60.0s")
+
+    mock_nvidia = AsyncMock(spec=LLMAnswerEngine)
+    mock_nvidia.provider = "nvidia"
+    mock_nvidia.generate_answers.side_effect = LLMTimeoutError("NVIDIA API request timed out after 60.0s")
+
+    engine = LLMAnswerEngine(
+        provider="freellm",
+        api_key="valid-freellm-key",
+        max_retries=1,
+        retry_backoff=0.001,
+        fallback_engine=mock_nvidia,
+        http_client=mock_client,
+    )
+
+    ws = _create_sample_parsed_worksheet()
+
+    with pytest.raises(AnswerEngineError) as exc_info:
+        await engine.generate_answers(ws)
+
+    err_str = str(exc_info.value)
+    assert "Both primary provider ('freellm') and fallback provider ('nvidia') failed" in err_str
+    assert "Primary:" in err_str
+    assert "Fallback:" in err_str
+
+
+@pytest.mark.asyncio
+async def test_no_secrets_in_logs_and_exceptions():
+    """Verify that sensitive API keys are never exposed in error messages or exception strings."""
+    secret_freellm_key = "freellmapi-a2916b925fcca6f34474630ccb455fa101c1360a048b8ab4"
+    secret_nvidia_key = "nvapi-abcdef1234567890abcdef1234567890"
+
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    mock_client.post.side_effect = httpx.TimeoutException(f"Timeout on key {secret_freellm_key}")
+
+    mock_nvidia = AsyncMock(spec=LLMAnswerEngine)
+    mock_nvidia.provider = "nvidia"
+    mock_nvidia.generate_answers.side_effect = LLMResponseError(f"Auth error on key {secret_nvidia_key}")
+
+    engine = LLMAnswerEngine(
+        provider="freellm",
+        api_key=secret_freellm_key,
+        max_retries=1,
+        retry_backoff=0.001,
+        fallback_engine=mock_nvidia,
+        http_client=mock_client,
+    )
+
+    ws = _create_sample_parsed_worksheet()
+
+    with pytest.raises(AnswerEngineError) as exc_info:
+        await engine.generate_answers(ws)
+
+    err_str = str(exc_info.value)
+    assert secret_freellm_key not in err_str
+    assert secret_nvidia_key not in err_str
+    assert "[REDACTED_FREELLM_KEY]" in err_str or "[REDACTED" in err_str
+
+
+@pytest.mark.asyncio
+async def test_all_questions_still_receive_answers_after_fallback():
+    """Verify question order, IDs, and answer coverage are preserved after fallback."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    mock_client.post.side_effect = httpx.TimeoutException("FREELLM API request timed out after 60.0s")
+
+    ws = _create_sample_parsed_worksheet()
+    mock_nvidia = AsyncMock(spec=LLMAnswerEngine)
+    mock_nvidia.provider = "nvidia"
+    mock_nvidia.generate_answers.return_value = WorksheetAnswers(
+        worksheet_filename=ws.filename,
+        answers=[
+            GeneratedAnswer(question_id=q.question_id, question_number=q.question_number, question_type=q.question_type, answer_text=f"Solved {q.question_id}", confidence=0.92, status=AnswerStatus.SUCCESS)
+            for q in ws.questions
+        ],
+        provider="nvidia",
+    )
+
+    engine = LLMAnswerEngine(
+        provider="freellm",
+        api_key="valid-freellm-key",
+        max_retries=1,
+        retry_backoff=0.001,
+        fallback_engine=mock_nvidia,
+        http_client=mock_client,
+    )
+
+    result = await engine.generate_answers(ws)
+
+    assert len(result.answers) == len(ws.questions)
+    for orig_q, ans in zip(ws.questions, result.answers):
+        assert ans.question_id == orig_q.question_id
+        assert ans.question_number == orig_q.question_number
+        assert ans.answer_text == f"Solved {orig_q.question_id}"
+        assert ans.status == AnswerStatus.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_large_mixed_worksheet_chunking():
+    """Verify large worksheets are split into smaller chunks without dropping questions."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+
+    def chunk_response(*args, **kwargs):
+        body = kwargs.get("json", {})
+        messages = body.get("messages", [])
+        user_content = messages[1]["content"] if len(messages) > 1 else ""
+        import json as jmod
+        # Extract question IDs from prompt payload
+        import re as remod
+        q_ids = remod.findall(r'"question_id":\s*"([^"]+)"', user_content)
+        answers = [
+            {"question_id": qid, "question_number": "1", "answer_text": f"Answer for {qid}", "confidence": 0.95}
+            for qid in q_ids
+        ]
+        return _create_freellm_success_response(answers)
+
+    mock_client.post.side_effect = chunk_response
+
+    # Create worksheet with 9 questions
+    questions = [
+        ParsedQuestion(
+            question_id=f"q_{i}",
+            question_number=str(i),
+            question_type=QuestionType.SHORT_ANSWER,
+            question_text=f"Question text for {i}",
+            marks=2,
+        )
+        for i in range(1, 10)
+    ]
+    large_ws = ParsedWorksheet(
+        filename="large_worksheet.docx",
+        file_format="docx",
+        questions=questions,
+    )
+
+    engine = LLMAnswerEngine(
+        provider="freellm",
+        api_key="valid-freellm-key",
+        chunk_size=4,  # 9 questions -> chunks of 4, 4, 1
+        http_client=mock_client,
+    )
+
+    result = await engine.generate_answers(large_ws)
+
+    assert mock_client.post.call_count == 3  # 3 chunks
+    assert len(result.answers) == 9
+    for i, ans in enumerate(result.answers, 1):
+        assert ans.question_id == f"q_{i}"
+        assert ans.answer_text == f"Answer for q_{i}"
+
