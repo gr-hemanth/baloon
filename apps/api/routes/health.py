@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 from packages.shared.config import settings
+from packages.worksheets.answer_engine import get_circuit_breaker
 
 router = APIRouter(tags=["Health"])
 
@@ -13,11 +14,12 @@ def get_health():
 @router.get("/status")
 @router.get("/api/v1/provider/status")
 def get_provider_status():
-    """Report AI answer provider status and fallback configuration."""
+    """Report AI answer provider status, circuit breaker health, and fallback configuration."""
     order = settings.get_provider_order()
     primary = order[0] if order else "nvidia"
     fallback = order[1] if len(order) > 1 else getattr(settings, "AI_FALLBACK_PROVIDER", "freellm")
     has_key = bool(settings.NVIDIA_API_KEY if primary == "nvidia" else settings.FREELLM_API_KEY)
+    cb = get_circuit_breaker(primary)
     return {
         "status": "ok",
         "primary_provider": primary,
@@ -26,5 +28,7 @@ def get_provider_status():
         "model": settings.NVIDIA_MODEL if primary == "nvidia" else settings.FREELLM_MODEL,
         "base_url": settings.NVIDIA_BASE_URL if primary == "nvidia" else settings.FREELLM_BASE_URL,
         "configured": has_key,
+        "models": settings.get_nvidia_models() if primary == "nvidia" else [settings.FREELLM_MODEL],
+        "circuit_breaker": cb.to_dict(),
     }
 

@@ -36,6 +36,15 @@ def setup_test_environment():
     settings.WORKSHEET_ANSWER_PROVIDER = orig_provider
 
 
+@pytest.fixture(autouse=True)
+def reset_ai_circuit_breakers():
+    """Ensure circuit breaker health states are isolated across test runs."""
+    from packages.worksheets.answer_engine import reset_circuit_breakers
+    reset_circuit_breakers()
+    yield
+    reset_circuit_breakers()
+
+
 @pytest.fixture(scope="function")
 def db_session() -> Generator[Session, None, None]:
     """Provide a clean database session for each test function."""

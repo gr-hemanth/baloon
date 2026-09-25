@@ -11,8 +11,11 @@ Provides an extensible, provider-agnostic answer generation pipeline supporting:
 import asyncio
 import json
 import logging
+from enum import Enum
 import os
+import random
 import re
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -60,6 +63,186 @@ def redact_api_keys(text: Any) -> str:
     for pat, repl in patterns:
         text_str = re.sub(pat, repl, text_str)
     return text_str
+
+
+def parse_retry_after(header_val: Optional[str]) -> Optional[float]:
+    """Parse Retry-After header into float seconds, or None if absent/invalid."""
+    if not header_val:
+        return None
+    val = header_val.strip()
+    try:
+        secs = float(val)
+        return max(0.0, min(secs, 60.0))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(val)
+        diff = dt.timestamp() - time.time()
+        return max(0.0, min(diff, 60.0))
+    except Exception:
+        return None
+
+
+def calculate_backoff(
+    attempt: int,
+    base_backoff: float,
+    retry_after: Optional[float] = None,
+    max_backoff: float = 30.0,
+) -> float:
+    """Calculate exponential backoff with full jitter and Retry-After support."""
+    if retry_after is not None and retry_after > 0:
+        return min(retry_after, max_backoff)
+    # Exponential backoff: base * 2^(attempt - 1)
+    exp = base_backoff * (2 ** max(0, attempt - 1))
+    # Full jitter: random uniform between 0.05 and 0.5 * exp
+    jitter = random.uniform(0.05, 0.5 * max(0.1, exp))
+    return min(exp + jitter, max_backoff)
+
+
+def is_transient_error(exc: Exception) -> bool:
+    """Determine whether an error is transient (eligible for retry) or permanent."""
+    if isinstance(exc, (LLMTimeoutError, LLMNetworkError, httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    if isinstance(exc, LLMRateLimitError):
+        return True
+    if isinstance(exc, LLMResponseError):
+        if exc.status_code in (500, 502, 503, 504):
+            return True
+        if exc.status_code in (400, 401, 403, 404, 410):
+            return False
+        err_str = str(exc).lower()
+        if any(c in err_str for c in ("500", "502", "503", "504", "overloaded", "unavailable", "timed out")):
+            return True
+        return False
+    return False
+
+
+class CircuitState(str, Enum):
+    """Lifecycle states of the AI provider circuit breaker."""
+    CLOSED = "CLOSED"      # Healthy: requests allowed
+    OPEN = "OPEN"          # Degraded: requests blocked and diverted to fallback
+    HALF_OPEN = "HALF_OPEN"# Probing: testing recovery with single probe request
+
+
+class ProviderCircuitBreaker:
+    """Lightweight in-memory circuit breaker tracking runtime AI provider health."""
+
+    def __init__(
+        self,
+        provider_name: str,
+        failure_threshold: int = 3,
+        cooldown_seconds: float = 30.0,
+    ):
+        self.provider_name = provider_name
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self.state = CircuitState.CLOSED
+        self.consecutive_failures = 0
+        self.last_failure_time = 0.0
+        self.last_error = ""
+
+    def can_attempt(self) -> bool:
+        """Check if provider is eligible to process a request."""
+        if self.state == CircuitState.CLOSED:
+            return True
+        now = time.time()
+        if self.state == CircuitState.OPEN:
+            if now - self.last_failure_time >= self.cooldown_seconds:
+                logger.info(
+                    "[CircuitBreaker] %s cooldown (%.1fs) elapsed; transitioning OPEN -> HALF_OPEN (probing)",
+                    self.provider_name,
+                    self.cooldown_seconds,
+                )
+                self.state = CircuitState.HALF_OPEN
+                return True
+            return False
+        # HALF_OPEN allows probe
+        return True
+
+    def remaining_cooldown(self) -> float:
+        """Return remaining seconds in cooldown if OPEN, else 0.0."""
+        if self.state != CircuitState.OPEN:
+            return 0.0
+        elapsed = time.time() - self.last_failure_time
+        return max(0.0, self.cooldown_seconds - elapsed)
+
+    def record_success(self):
+        """Record successful request; recover to CLOSED if previously degraded."""
+        if self.state != CircuitState.CLOSED:
+            logger.info(
+                "[CircuitBreaker] %s probe succeeded; transitioning %s -> CLOSED (healthy)",
+                self.provider_name,
+                self.state.value,
+            )
+        self.state = CircuitState.CLOSED
+        self.consecutive_failures = 0
+        self.last_error = ""
+
+    def record_failure(self, error_msg: str, is_transient: bool = True):
+        """Record a failure; if consecutive failures reach threshold, trip to OPEN."""
+        if not is_transient:
+            return
+        self.consecutive_failures += 1
+        self.last_failure_time = time.time()
+        self.last_error = error_msg
+        if self.consecutive_failures >= self.failure_threshold:
+            if self.state != CircuitState.OPEN:
+                logger.warning(
+                    "[CircuitBreaker] %s reached %d consecutive failures (%s); tripping circuit to OPEN (cooldown=%.1fs)",
+                    self.provider_name,
+                    self.consecutive_failures,
+                    redact_api_keys(error_msg),
+                    self.cooldown_seconds,
+                )
+            self.state = CircuitState.OPEN
+
+    def trip(self):
+        """Manually trip circuit to OPEN for testing."""
+        self.state = CircuitState.OPEN
+        self.last_failure_time = time.time()
+
+    def reset(self):
+        """Reset circuit breaker to pristine CLOSED state."""
+        self.state = CircuitState.CLOSED
+        self.consecutive_failures = 0
+        self.last_failure_time = 0.0
+        self.last_error = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize circuit breaker health status."""
+        return {
+            "provider": self.provider_name,
+            "state": self.state.value,
+            "consecutive_failures": self.consecutive_failures,
+            "failure_threshold": self.failure_threshold,
+            "cooldown_seconds": self.cooldown_seconds,
+            "remaining_cooldown_seconds": round(self.remaining_cooldown(), 1),
+            "is_degraded": self.state == CircuitState.OPEN,
+        }
+
+
+_CIRCUIT_BREAKERS: Dict[str, ProviderCircuitBreaker] = {}
+
+
+def get_circuit_breaker(provider: str) -> ProviderCircuitBreaker:
+    """Get or create singleton circuit breaker for a provider."""
+    p = (provider or "unknown").lower()
+    if p not in _CIRCUIT_BREAKERS:
+        threshold = getattr(settings, f"{p.upper()}_CIRCUIT_BREAKER_FAILURES", 3)
+        cooldown = getattr(settings, f"{p.upper()}_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 30.0)
+        _CIRCUIT_BREAKERS[p] = ProviderCircuitBreaker(
+            provider_name=p,
+            failure_threshold=threshold,
+            cooldown_seconds=cooldown,
+        )
+    return _CIRCUIT_BREAKERS[p]
+
+
+def reset_circuit_breakers():
+    """Reset all circuit breakers (primarily for test isolation)."""
+    for cb in _CIRCUIT_BREAKERS.values():
+        cb.reset()
 
 
 
@@ -791,6 +974,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+        model_fallbacks: Optional[List[str]] = None,
         temperature: Optional[float] = None,
         max_output_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
@@ -913,7 +1097,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
         elif self.provider == "freellm":
             self.max_retries = getattr(settings, "FREELLM_MAX_RETRIES", 2)
         elif self.provider == "nvidia":
-            self.max_retries = getattr(settings, "NVIDIA_MAX_RETRIES", 1)
+            self.max_retries = getattr(settings, "NVIDIA_MAX_RETRIES", 3)
         else:
             self.max_retries = 0
 
@@ -927,11 +1111,23 @@ class LLMAnswerEngine(BaseAnswerEngine):
         else:
             self.retry_backoff = getattr(settings, "FREELLM_RETRY_BACKOFF_SECONDS", 2.0)
 
-        self.chunk_size = (
-            chunk_size
-            if chunk_size is not None
-            else getattr(settings, "WORKSHEET_CHUNK_SIZE", 5)
-        )
+        if chunk_size is not None:
+            self.chunk_size = chunk_size
+        elif self.provider == "freellm":
+            self.chunk_size = getattr(settings, "FREELLM_BATCH_SIZE", 2)
+        elif self.provider == "nvidia":
+            self.chunk_size = getattr(settings, "NVIDIA_BATCH_SIZE", 4)
+        else:
+            self.chunk_size = getattr(settings, "WORKSHEET_CHUNK_SIZE", 4)
+
+        if model_fallbacks is not None:
+            self.model_fallbacks = [m for m in model_fallbacks if m != self.model]
+        elif self.provider == "nvidia":
+            self.model_fallbacks = [m for m in settings.get_nvidia_models() if m != self.model]
+        else:
+            self.model_fallbacks = []
+
+        self.circuit_breaker = get_circuit_breaker(self.provider)
 
         self.max_output_tokens = (
             max_output_tokens
@@ -955,6 +1151,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
                     max_retries=getattr(settings, "FREELLM_MAX_RETRIES", 2),
                     timeout=getattr(settings, "FREELLM_TIMEOUT_SECONDS", 60.0),
                     temperature=getattr(settings, "FREELLM_TEMPERATURE", 0.2),
+                    chunk_size=getattr(settings, "FREELLM_BATCH_SIZE", 2),
                 )
             elif fb_prov == "nvidia":
                 fb_key = getattr(settings, "NVIDIA_API_KEY", None) or os.getenv("NVIDIA_API_KEY")
@@ -963,9 +1160,10 @@ class LLMAnswerEngine(BaseAnswerEngine):
                     api_key=fb_key,
                     allow_fallback_when_unconfigured=allow_fallback_when_unconfigured,
                     fallback_engine=None,
-                    max_retries=getattr(settings, "NVIDIA_MAX_RETRIES", 1),
+                    max_retries=getattr(settings, "NVIDIA_MAX_RETRIES", 3),
                     timeout=getattr(settings, "NVIDIA_TIMEOUT_SECONDS", 60.0),
                     temperature=getattr(settings, "NVIDIA_TEMPERATURE", 0.2),
+                    chunk_size=getattr(settings, "NVIDIA_BATCH_SIZE", 4),
                 )
             elif fb_prov in ("rule", "mock"):
                 self.fallback_engine = RuleBasedAnswerEngine()
@@ -986,6 +1184,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
                         max_retries=getattr(settings, "FREELLM_MAX_RETRIES", 2),
                         timeout=getattr(settings, "FREELLM_TIMEOUT_SECONDS", 60.0),
                         temperature=getattr(settings, "FREELLM_TEMPERATURE", 0.2),
+                        chunk_size=getattr(settings, "FREELLM_BATCH_SIZE", 2),
                     )
                 elif fb_prov == "nvidia":
                     fb_key = getattr(settings, "NVIDIA_API_KEY", None) or os.getenv("NVIDIA_API_KEY")
@@ -994,9 +1193,10 @@ class LLMAnswerEngine(BaseAnswerEngine):
                         api_key=fb_key,
                         allow_fallback_when_unconfigured=allow_fallback_when_unconfigured,
                         fallback_engine=None,
-                        max_retries=getattr(settings, "NVIDIA_MAX_RETRIES", 1),
+                        max_retries=getattr(settings, "NVIDIA_MAX_RETRIES", 3),
                         timeout=getattr(settings, "NVIDIA_TIMEOUT_SECONDS", 60.0),
                         temperature=getattr(settings, "NVIDIA_TEMPERATURE", 0.2),
+                        chunk_size=getattr(settings, "NVIDIA_BATCH_SIZE", 4),
                     )
                 elif fb_prov in ("rule", "mock"):
                     self.fallback_engine = RuleBasedAnswerEngine()
@@ -1040,7 +1240,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
         worksheet: ParsedWorksheet,
         context: Optional[Dict[str, Any]] = None,
     ) -> WorksheetAnswers:
-        """Generate answers utilizing configured LLM API (FreeLLM/Gemini/NVIDIA), with retries, failover, and chunking."""
+        """Generate answers utilizing configured LLM API (NVIDIA/FreeLLM), with bounded retries, failover, chunking, and partial-success preservation."""
         if not self.is_configured:
             if self.allow_fallback_when_unconfigured:
                 logger.info("No AI provider API key found; utilizing deterministic fallback engine.")
@@ -1061,151 +1261,298 @@ class LLMAnswerEngine(BaseAnswerEngine):
         chunk_size = self.chunk_size
         total_questions = len(worksheet.questions)
 
+        # Split questions into bounded chunks
         if chunk_size > 0 and total_questions > chunk_size:
+            chunks = [
+                worksheet.questions[i : i + chunk_size]
+                for i in range(0, total_questions, chunk_size)
+            ]
+        else:
+            chunks = [worksheet.questions]
+
+        total_batches = len(chunks)
+        if total_batches > 1:
             logger.info(
-                "Worksheet %s has %d questions; splitting into batches of %d for resilient generation.",
+                "Worksheet %s has %d questions; splitting into %d batches (batch_size=%d) for resilient generation.",
                 worksheet.filename,
                 total_questions,
+                total_batches,
                 chunk_size,
             )
-            all_answers: List[GeneratedAnswer] = []
-            for i in range(0, total_questions, chunk_size):
-                chunk_slice = worksheet.questions[i : i + chunk_size]
-                chunk_ws = worksheet.model_copy(update={"questions": chunk_slice})
-                chunk_ans = await self._generate_with_retry_and_fallback(chunk_ws, context)
-                all_answers.extend(chunk_ans.answers)
 
-            # Preserve exact order according to worksheet questions
-            answers_by_id = {a.question_id: a for a in all_answers}
-            ordered_answers = [
-                answers_by_id.get(q.question_id)
-                for q in worksheet.questions
-                if q.question_id in answers_by_id
+        resolved_answers: Dict[str, GeneratedAnswer] = {}
+        circuit_breaker = get_circuit_breaker(self.provider)
+
+        for batch_idx, batch_questions in enumerate(chunks, 1):
+            batch_ws = worksheet.model_copy(update={"questions": batch_questions})
+            primary_error: Optional[Exception] = None
+
+            # 1. Attempt Primary Provider if circuit breaker allows
+            if circuit_breaker.can_attempt():
+                try:
+                    batch_ans = await self._generate_batch_with_retry(
+                        batch_ws, context, batch_idx=batch_idx, total_batches=total_batches
+                    )
+                    circuit_breaker.record_success()
+                    for ans in batch_ans.answers:
+                        if ans.metadata is None:
+                            ans.metadata = {}
+                        ans.metadata.setdefault("provider", self.provider)
+                        resolved_answers[ans.question_id] = ans
+                except Exception as exc:
+                    primary_error = exc
+                    is_transient = is_transient_error(exc)
+                    circuit_breaker.record_failure(redact_api_keys(str(exc)), is_transient=is_transient)
+            else:
+                rem = circuit_breaker.remaining_cooldown()
+                primary_error = AnswerEngineError(
+                    f"{self.provider.upper()} circuit is currently OPEN (degraded). Cooldown remaining: {rem:.1f}s"
+                )
+                logger.warning(
+                    "[AI Circuit Open] %s circuit is degraded (%.1fs cooldown). Diverting batch %d/%d directly to fallback provider.",
+                    self.provider,
+                    rem,
+                    batch_idx,
+                    total_batches,
+                )
+
+            # 2. Check for missing or errored questions in this batch
+            missing_q = [
+                q for q in batch_questions
+                if q.question_id not in resolved_answers or resolved_answers[q.question_id].status == AnswerStatus.ERROR
             ]
-            if len(ordered_answers) != len(worksheet.questions):
-                ordered_answers = all_answers
 
-            return WorksheetAnswers(
-                worksheet_filename=worksheet.filename,
-                answers=ordered_answers,
-                provider=self.provider,
-                metadata={
-                    "course_code": worksheet.course_code,
-                    "total": len(ordered_answers),
-                    "chunked": True,
-                    "chunk_size": chunk_size,
-                },
-            )
+            # 3. Fail over missing portion to fallback provider without destroying already succeeded answers
+            if missing_q:
+                if self.fallback_engine is not None and self.fallback_engine is not self:
+                    fallback_name = getattr(self.fallback_engine, "provider", "fallback")
+                    logger.warning(
+                        "[AI Failover] Failing over batch %d/%d (%d questions) from %s to %s. Reason: %s",
+                        batch_idx,
+                        total_batches,
+                        len(missing_q),
+                        self.provider,
+                        fallback_name,
+                        redact_api_keys(str(primary_error or "Omitted by primary provider")),
+                    )
+                    missing_ws = worksheet.model_copy(update={"questions": missing_q})
+                    try:
+                        fb_ans = await self.fallback_engine.generate_answers(missing_ws, context)
+                        fb_prov_name = getattr(fb_ans, "provider", None) or fallback_name
+                        for ans in fb_ans.answers:
+                            if ans.status != AnswerStatus.ERROR:
+                                if ans.metadata is None:
+                                    ans.metadata = {}
+                                ans.metadata.setdefault("provider", fb_prov_name)
+                                resolved_answers[ans.question_id] = ans
+                    except Exception as fb_exc:
+                        logger.error(
+                            "[AI Failover Error] Fallback provider '%s' also failed for batch %d/%d: %s",
+                            fallback_name,
+                            batch_idx,
+                            total_batches,
+                            redact_api_keys(str(fb_exc)),
+                        )
+                        if self.allow_fallback_when_unconfigured:
+                            logger.warning("Failing over remaining questions to offline rule-based engine.")
+                            rule_ans = await self.offline_fallback_engine.generate_answers(missing_ws, context)
+                            for ans in rule_ans.answers:
+                                if ans.metadata is None:
+                                    ans.metadata = {}
+                                ans.metadata.setdefault("provider", "rule")
+                                resolved_answers[ans.question_id] = ans
+                        elif primary_error is not None:
+                            raise AnswerEngineError(
+                                f"Both primary provider ('{self.provider}') and fallback provider ('{fallback_name}') failed to generate answers. "
+                                f"Primary: {redact_api_keys(str(primary_error))}; Fallback: {redact_api_keys(str(fb_exc))}"
+                            ) from fb_exc
+                elif primary_error is not None:
+                    if self.allow_fallback_when_unconfigured:
+                        logger.warning("No fallback provider configured; using offline rule-based engine for missing batch.")
+                        missing_ws = worksheet.model_copy(update={"questions": missing_q})
+                        rule_ans = await self.offline_fallback_engine.generate_answers(missing_ws, context)
+                        for ans in rule_ans.answers:
+                            if ans.metadata is None:
+                                ans.metadata = {}
+                            ans.metadata.setdefault("provider", "rule")
+                            resolved_answers[ans.question_id] = ans
+                    else:
+                        raise primary_error
+
+        # 4. Strictly assemble and validate final answer set in exact original question order
+        final_answers: List[GeneratedAnswer] = []
+        for q in worksheet.questions:
+            ans = resolved_answers.get(q.question_id)
+            if not ans:
+                if self.allow_fallback_when_unconfigured:
+                    ans = self.offline_fallback_engine._answer_short_answer(q)
+                    if ans.metadata is None:
+                        ans.metadata = {}
+                    ans.metadata.setdefault("provider", "rule")
+                else:
+                    raise MissingAnswerError(f"Question '{q.question_id}' was not answered by any provider.")
+            final_answers.append(ans)
+
+        # Verify no duplicate answers exist
+        seen_ids = set()
+        for a in final_answers:
+            if a.question_id in seen_ids:
+                logger.warning("Duplicate answer detected for %s during final assembly!", a.question_id)
+            seen_ids.add(a.question_id)
+
+        providers_used = {
+            a.metadata.get("provider", self.provider) if a.metadata else self.provider
+            for a in final_answers
+        }
+        if not providers_used:
+            effective_provider = self.provider
+        elif len(providers_used) == 1:
+            effective_provider = next(iter(providers_used))
         else:
-            return await self._generate_with_retry_and_fallback(worksheet, context)
+            effective_provider = f"{self.provider}+{'+'.join(p for p in sorted(providers_used) if p != self.provider)}"
+
+        return WorksheetAnswers(
+            worksheet_filename=worksheet.filename,
+            answers=final_answers,
+            provider=effective_provider,
+            metadata={
+                "course_code": worksheet.course_code,
+                "model": self.model,
+                "total": len(final_answers),
+                "providers_used": list(providers_used),
+                "chunked": total_batches > 1,
+                "chunk_size": chunk_size,
+            },
+        )
+
+    async def _generate_batch_with_retry(
+        self,
+        batch_ws: ParsedWorksheet,
+        context: Optional[Dict[str, Any]],
+        batch_idx: int = 1,
+        total_batches: int = 1,
+    ) -> WorksheetAnswers:
+        """Execute chat completion request for a single batch with bounded retries, backoff, jitter, and model fallbacks."""
+        models_to_try = [self.model]
+        if self.provider == "nvidia" and self.model_fallbacks:
+            for fb_m in self.model_fallbacks:
+                if fb_m not in models_to_try:
+                    models_to_try.append(fb_m)
+
+        last_error: Optional[Exception] = None
+
+        for model_idx, target_model in enumerate(models_to_try):
+            attempt = 0
+            backoff = self.retry_backoff
+
+            while attempt <= self.max_retries:
+                attempt_num = attempt + 1
+                t0 = time.perf_counter()
+                try:
+                    logger.info(
+                        "[AI Attempt] provider=%s model=%s batch=%d/%d questions=%d attempt=%d/%d",
+                        self.provider,
+                        target_model,
+                        batch_idx,
+                        total_batches,
+                        len(batch_ws.questions),
+                        attempt_num,
+                        self.max_retries + 1,
+                    )
+                    if self.provider in ("freellm", "openai", "nvidia"):
+                        res = await self._generate_openai_compatible_answers(batch_ws, context, override_model=target_model)
+                    elif self.provider in ("gemini", "llm"):
+                        res = await self._generate_gemini_answers(batch_ws, context)
+                    else:
+                        raise ValueError(f"Unsupported AI provider: '{self.provider}'")
+
+                    dur = time.perf_counter() - t0
+                    logger.info(
+                        "[AI Attempt Success] provider=%s model=%s batch=%d/%d attempt=%d duration=%.2fs answers=%d",
+                        self.provider,
+                        target_model,
+                        batch_idx,
+                        total_batches,
+                        attempt_num,
+                        dur,
+                        len(res.answers),
+                    )
+                    return res
+
+                except Exception as exc:
+                    dur = time.perf_counter() - t0
+                    last_error = exc
+                    sanitized_msg = redact_api_keys(str(exc))
+                    is_transient = is_transient_error(exc)
+                    retry_after = getattr(exc, "retry_after", None)
+
+                    logger.warning(
+                        "[AI Attempt Failed] provider=%s model=%s batch=%d/%d attempt=%d/%d duration=%.2fs transient=%s error=%s",
+                        self.provider,
+                        target_model,
+                        batch_idx,
+                        total_batches,
+                        attempt_num,
+                        self.max_retries + 1,
+                        dur,
+                        is_transient,
+                        sanitized_msg,
+                    )
+
+                    # For permanent errors (400, 401, 403, 404, 410), fail immediately without wasting retries
+                    if not is_transient:
+                        break
+
+                    # If transient error and retries remain, backoff with jitter and retry
+                    if attempt < self.max_retries:
+                        sleep_time = calculate_backoff(attempt_num, backoff, retry_after=retry_after)
+                        logger.info(
+                            "[AI Retry Wait] provider=%s model=%s backing off for %.2fs before attempt %d",
+                            self.provider,
+                            target_model,
+                            sleep_time,
+                            attempt_num + 1,
+                        )
+                        if sleep_time > 0:
+                            await asyncio.sleep(sleep_time)
+                        attempt += 1
+                        backoff *= 2
+                    else:
+                        break
+
+            # If this model failed and another fallback model exists within provider, try next model
+            # Model fallback is designed for model-specific errors (503 overloaded, 404, 410, 422, 400), not network timeouts
+            is_model_specific = (
+                isinstance(last_error, LLMResponseError)
+                and (
+                    last_error.status_code in (503, 404, 410, 422, 400)
+                    or "overloaded" in str(last_error).lower()
+                    or "model" in str(last_error).lower()
+                )
+            )
+            if is_model_specific and (model_idx + 1 < len(models_to_try)):
+                next_model = models_to_try[model_idx + 1]
+                logger.warning(
+                    "[AI Model Fallback] Model '%s' failed for provider '%s' (%s); trying model fallback '%s'",
+                    target_model,
+                    self.provider,
+                    redact_api_keys(str(last_error)),
+                    next_model,
+                )
+            else:
+                break
+
+        if last_error:
+            raise last_error
+        raise AnswerEngineError(f"Provider '{self.provider}' failed to generate answers.")
 
     async def _generate_with_retry_and_fallback(
         self,
         worksheet: ParsedWorksheet,
         context: Optional[Dict[str, Any]] = None,
     ) -> WorksheetAnswers:
-        """Execute chat completion request with retry loop and provider failover."""
-        attempt = 0
-        backoff = self.retry_backoff
-        last_error: Optional[Exception] = None
-
-        logger.info(
-            "Calling %s API (endpoint=%s, model=%s) for %d questions in worksheet %s",
-            self.provider,
-            self.base_url,
-            self.model,
-            len(worksheet.questions),
-            worksheet.filename,
-        )
-
-        while attempt <= self.max_retries:
-            try:
-                if self.provider in ("freellm", "openai", "nvidia"):
-                    return await self._generate_openai_compatible_answers(worksheet, context)
-                elif self.provider in ("gemini", "llm"):
-                    return await self._generate_gemini_answers(worksheet, context)
-                else:
-                    raise ValueError(f"Unsupported AI provider: '{self.provider}'")
-            except (LLMTimeoutError, LLMNetworkError) as exc:
-                last_error = exc
-                sanitized_msg = redact_api_keys(str(exc))
-                if attempt < self.max_retries:
-                    logger.warning(
-                        "Provider '%s' attempt %d/%d failed with %s. Retrying in %.2fs...",
-                        self.provider,
-                        attempt + 1,
-                        self.max_retries + 1,
-                        sanitized_msg,
-                        backoff,
-                    )
-                    attempt += 1
-                    if backoff > 0:
-                        await asyncio.sleep(backoff)
-                    backoff *= 2
-                else:
-                    logger.warning(
-                        "Provider '%s' exhausted all %d attempts (%s).",
-                        self.provider,
-                        self.max_retries + 1,
-                        sanitized_msg,
-                    )
-                    break
-            except LLMResponseError as exc:
-                last_error = exc
-                sanitized_msg = redact_api_keys(str(exc))
-                if attempt < self.max_retries and any(c in sanitized_msg for c in ("500", "502", "503", "504")):
-                    logger.warning(
-                        "Provider '%s' server error on attempt %d/%d: %s. Retrying in %.2fs...",
-                        self.provider,
-                        attempt + 1,
-                        self.max_retries + 1,
-                        sanitized_msg,
-                        backoff,
-                    )
-                    attempt += 1
-                    if backoff > 0:
-                        await asyncio.sleep(backoff)
-                    backoff *= 2
-                else:
-                    break
-            except Exception as exc:
-                last_error = exc
-                break
-
-        # Primary provider failed after all attempts
-        if self.fallback_engine is not None and self.fallback_engine is not self:
-            fallback_name = getattr(self.fallback_engine, "provider", "fallback")
-            logger.warning(
-                "Primary provider '%s' failed (%s); failing over to fallback provider '%s'",
-                self.provider,
-                redact_api_keys(str(last_error)),
-                fallback_name,
-            )
-            try:
-                fallback_result = await self.fallback_engine.generate_answers(worksheet, context)
-                return fallback_result
-            except Exception as fb_exc:
-                logger.error(
-                    "Fallback provider '%s' also failed: %s",
-                    fallback_name,
-                    redact_api_keys(str(fb_exc)),
-                )
-                if self.allow_fallback_when_unconfigured:
-                    logger.warning("Failing over to offline rule-based engine due to provider failures.")
-                    return await self.offline_fallback_engine.generate_answers(worksheet, context)
-                raise AnswerEngineError(
-                    f"Both primary provider ('{self.provider}') and fallback provider ('{fallback_name}') failed to generate answers. "
-                    f"Primary: {redact_api_keys(str(last_error))}; Fallback: {redact_api_keys(str(fb_exc))}"
-                ) from fb_exc
-
-        if self.allow_fallback_when_unconfigured:
-            logger.warning("No fallback provider configured; falling back to offline rule-based engine.")
-            return await self.offline_fallback_engine.generate_answers(worksheet, context)
-
-        # No fallback engine configured
-        if last_error:
-            raise last_error
-        raise AnswerEngineError(f"Provider '{self.provider}' failed to generate answers.")
+        """Alias for generate_answers for backward compatibility."""
+        return await self.generate_answers(worksheet, context)
 
     async def answer_question(
         self,
@@ -1279,11 +1626,14 @@ class LLMAnswerEngine(BaseAnswerEngine):
         self,
         answers_list: list,
         worksheet: ParsedWorksheet,
+        active_model: Optional[str] = None,
     ) -> WorksheetAnswers:
         """Map and validate parsed model answers against target worksheet questions."""
+        used_model = active_model or self.model
         answers_by_id: Dict[str, Dict[str, Any]] = {}
         answers_by_num: Dict[str, Dict[str, Any]] = {}
 
+        logger.info("[AI Parsed Answers List] count=%d data=%s", len(answers_list), json.dumps(answers_list)[:500])
         for ans_dict in answers_list:
             if isinstance(ans_dict, dict):
                 qid = str(ans_dict.get("question_id", "")).strip()
@@ -1296,13 +1646,24 @@ class LLMAnswerEngine(BaseAnswerEngine):
         generated_answers: List[GeneratedAnswer] = []
         missing_count = 0
 
-        for question in worksheet.questions:
+        for idx, question in enumerate(worksheet.questions):
             ans_data = answers_by_id.get(question.question_id)
             if not ans_data and question.question_number:
                 ans_data = answers_by_num.get(str(question.question_number))
+            if not ans_data and len(worksheet.questions) == len(answers_list) and idx < len(answers_list):
+                # Fallback to positional mapping when count matches
+                candidate = answers_list[idx]
+                if isinstance(candidate, dict):
+                    ans_data = candidate
 
             if ans_data:
-                ans_text = str(ans_data.get("answer_text", "")).strip()
+                ans_text = str(
+                    ans_data.get("answer_text")
+                    or ans_data.get("answer")
+                    or ans_data.get("text")
+                    or ans_data.get("content")
+                    or ""
+                ).strip()
                 if not ans_text:
                     ans_text = "[Empty answer returned by AI]"
                     status = AnswerStatus.LOW_CONFIDENCE
@@ -1338,7 +1699,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
                         confidence=conf,
                         explanation=ans_data.get("explanation"),
                         status=status,
-                        metadata={"provider": self.provider, "model": self.model},
+                        metadata={"provider": self.provider, "model": used_model},
                     )
                 )
             else:
@@ -1353,7 +1714,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
                         confidence=0.0,
                         status=AnswerStatus.ERROR,
                         error_message="Question omitted by AI provider",
-                        metadata={"provider": self.provider, "model": self.model},
+                        metadata={"provider": self.provider, "model": used_model},
                     )
                 )
 
@@ -1366,7 +1727,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
             provider=self.provider,
             metadata={
                 "course_code": worksheet.course_code,
-                "model": self.model,
+                "model": used_model,
                 "total": len(generated_answers),
                 "missing": missing_count,
             },
@@ -1376,6 +1737,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
         self,
         worksheet: ParsedWorksheet,
         context: Optional[Dict[str, Any]] = None,
+        override_model: Optional[str] = None,
     ) -> WorksheetAnswers:
         """Execute chat completion request against OpenAI-compatible API (e.g. FreeLLM)."""
         questions_payload = self._build_questions_payload(worksheet)
@@ -1469,7 +1831,8 @@ class LLMAnswerEngine(BaseAnswerEngine):
         }
         # For FreeLLM automatic model routing, FreeLLMAPI routes automatically when model="auto"
         # while keeping the user-facing/default configuration model="default".
-        request_model = "auto" if (self.provider == "freellm" and self.model in ("default", "auto")) else self.model
+        active_model = override_model or self.model
+        request_model = "auto" if (self.provider == "freellm" and active_model in ("default", "auto")) else active_model
         body = {
             "model": request_model,
             "messages": [
@@ -1509,10 +1872,21 @@ class LLMAnswerEngine(BaseAnswerEngine):
             raise LLMAuthenticationError(f"{self.provider.upper()} authentication failed ({resp.status_code}): {_extract_err_msg(resp)}")
 
         if resp.status_code == 429:
-            raise LLMRateLimitError(f"{self.provider.upper()} rate limit exceeded ({resp.status_code}): {_extract_err_msg(resp)}", status_code=429)
+            retry_after_hdr = resp.headers.get("retry-after")
+            retry_after_sec = parse_retry_after(retry_after_hdr)
+            raise LLMRateLimitError(
+                f"{self.provider.upper()} rate limit exceeded ({resp.status_code}): {_extract_err_msg(resp)}",
+                status_code=429,
+            )
 
         if resp.status_code >= 400:
-            raise LLMResponseError(f"{self.provider.upper()} API returned error ({resp.status_code}): {_extract_err_msg(resp)}")
+            retry_after_hdr = resp.headers.get("retry-after")
+            retry_after_sec = parse_retry_after(retry_after_hdr)
+            raise LLMResponseError(
+                f"{self.provider.upper()} API returned error ({resp.status_code}): {_extract_err_msg(resp)}",
+                status_code=resp.status_code,
+                retry_after=retry_after_sec,
+            )
 
         # Parse JSON response
         try:
@@ -1574,7 +1948,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
                 raw_response=str(raw_content),
             )
 
-        return self._map_and_validate_answers(answers_list, worksheet)
+        return self._map_and_validate_answers(answers_list, worksheet, active_model=active_model)
 
     async def _generate_gemini_answers(
         self,

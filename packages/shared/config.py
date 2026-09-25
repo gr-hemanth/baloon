@@ -53,13 +53,18 @@ class Settings(BaseSettings):
     NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
     NVIDIA_API_KEY: Optional[str] = None
     NVIDIA_MODEL: str = "nvidia/nemotron-3-super-120b-a12b"
+    NVIDIA_MODEL_FALLBACKS: str = "nvidia/nemotron-3-ultra-550b-a55b,meta/llama-3.2-11b-vision-instruct"  # Comma-separated fallback models
     NVIDIA_TEMPERATURE: float = 0.2
     NVIDIA_TIMEOUT_SECONDS: float = 60.0
-    NVIDIA_MAX_RETRIES: int = 1
+    NVIDIA_MAX_RETRIES: int = 3
     NVIDIA_RETRY_BACKOFF_SECONDS: float = 2.0
+    NVIDIA_CIRCUIT_BREAKER_FAILURES: int = 3
+    NVIDIA_CIRCUIT_BREAKER_COOLDOWN_SECONDS: float = 30.0
 
-    # Provider Failover Strategy & Chunking
-    WORKSHEET_CHUNK_SIZE: int = 5  # Number of questions per request chunk (0 to disable chunking)
+    # Provider Batch Sizes & Chunking
+    NVIDIA_BATCH_SIZE: int = 4
+    FREELLM_BATCH_SIZE: int = 4
+    WORKSHEET_CHUNK_SIZE: int = 4  # Number of questions per request chunk (0 to disable chunking)
 
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_MODEL: str = "gemini-1.5-flash"
@@ -99,6 +104,19 @@ class Settings(BaseSettings):
         if self.AI_FALLBACK_PROVIDER and self.AI_FALLBACK_PROVIDER.lower() not in order:
             order.append(self.AI_FALLBACK_PROVIDER.lower())
         return order or ["nvidia", "freellm"]
+
+    def get_nvidia_models(self) -> List[str]:
+        """Return configured primary NVIDIA model and any optional model fallbacks."""
+        models = []
+        primary = (self.NVIDIA_MODEL or "").strip()
+        if primary:
+            models.append(primary)
+        if self.NVIDIA_MODEL_FALLBACKS:
+            for m in self.NVIDIA_MODEL_FALLBACKS.split(","):
+                m_clean = m.strip()
+                if m_clean and m_clean not in models:
+                    models.append(m_clean)
+        return models or ["nvidia/nemotron-3-super-120b-a12b"]
 
 
 settings = Settings()

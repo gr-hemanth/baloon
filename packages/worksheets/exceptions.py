@@ -33,9 +33,17 @@ class LLMNetworkError(AnswerEngineError):
 
 class LLMResponseError(AnswerEngineError):
     """Raised when the model response is malformed, blocked, or fails schema validation."""
-    def __init__(self, message: str, raw_response: Optional[str] = None):
+    def __init__(
+        self,
+        message: str,
+        raw_response: Optional[str] = None,
+        status_code: Optional[int] = None,
+        retry_after: Optional[float] = None,
+    ):
         super().__init__(message)
         self.raw_response = raw_response
+        self.status_code = status_code
+        self.retry_after = retry_after
 
 
 class MissingAnswerError(AnswerEngineError):
