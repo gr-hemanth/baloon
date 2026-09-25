@@ -26,6 +26,7 @@ class GeneratedAnswer(BaseModel):
     selected_option: Optional[str] = None  # e.g., "A", "B", "C", "D"
     confidence: float = 1.0  # 0.0 to 1.0
     explanation: Optional[str] = None
+    target_answers: Dict[str, str] = Field(default_factory=dict)
     status: AnswerStatus = AnswerStatus.SUCCESS
     error_message: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)

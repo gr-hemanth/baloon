@@ -87,6 +87,35 @@ class QuestionClassifier:
         re.compile(r"\bderive\s+the\s+expression\b", re.IGNORECASE),
     ]
 
+    # Code and technical keywords
+    CODE_KEYWORDS = [
+        re.compile(r"\bwrite\s+(?:a\s+)?(?:java|python|c\+\+|c#|c|sql|javascript|html|css)\b", re.IGNORECASE),
+        re.compile(r"\bwrite\s+(?:a\s+)?(?:program|function|method|class|interface|query|script|code)\b", re.IGNORECASE),
+        re.compile(r"\bimplement\s+(?:a\s+)?(?:class|interface|method|function)\b", re.IGNORECASE),
+    ]
+
+    # Pseudocode keywords
+    PSEUDOCODE_KEYWORDS = [
+        re.compile(r"\bwrite\s+(?:the\s+)?pseudo-?code\b", re.IGNORECASE),
+        re.compile(r"\bpseudo-?code\b", re.IGNORECASE),
+        re.compile(r"\bwrite\s+(?:an?\s+)?algorithm\b", re.IGNORECASE),
+    ]
+
+    # Output / tracing keywords
+    OUTPUT_TRACING_KEYWORDS = [
+        re.compile(r"\bwhat\s+is\s+the\s+output\b", re.IGNORECASE),
+        re.compile(r"\bpredict\s+the\s+output\b", re.IGNORECASE),
+        re.compile(r"\btrace\s+the\s+(?:execution|output|code)\b", re.IGNORECASE),
+        re.compile(r"\bfind\s+the\s+output\b", re.IGNORECASE),
+    ]
+
+    # Tick / select keywords
+    TICK_SELECT_KEYWORDS = [
+        re.compile(r"\btick\s+(?:one|any|either)\b", re.IGNORECASE),
+        re.compile(r"\bselect\s+(?:one|any)\s+and\s+explain\b", re.IGNORECASE),
+        re.compile(r"\bchoose\s+one\s+and\s+explain\b", re.IGNORECASE),
+    ]
+
     @classmethod
     def extract_marks(cls, text: str) -> Optional[float]:
         """Extract explicit marks from question text if present."""
@@ -183,7 +212,21 @@ class QuestionClassifier:
         if any(kw in sec_lower for kw in ["fill in", "blanks", "one word", "true or false", "true/false"]):
             return QuestionType.ONE_WORD
 
-        # 3. LONG_ANSWER Detection
+        # 3. TICK_SELECT Detection
+        if any(kw.search(text) for kw in cls.TICK_SELECT_KEYWORDS):
+            return QuestionType.TICK_SELECT
+
+        # 4. CODE / PSEUDOCODE / OUTPUT_TRACING Detection
+        if any(kw.search(text) for kw in cls.CODE_KEYWORDS):
+            return QuestionType.CODE
+
+        if any(kw.search(text) for kw in cls.PSEUDOCODE_KEYWORDS):
+            return QuestionType.PSEUDOCODE
+
+        if any(kw.search(text) for kw in cls.OUTPUT_TRACING_KEYWORDS):
+            return QuestionType.OUTPUT_TRACING
+
+        # 5. LONG_ANSWER Detection
         # Signal A: High marks (>= 5 marks)
         if marks is not None and marks >= 5.0:
             return QuestionType.LONG_ANSWER

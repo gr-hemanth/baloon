@@ -16,6 +16,7 @@ from packages.worksheets.answer_target import is_answer_placeholder_text
 from packages.worksheets.base_parser import BaseWorksheetParser
 from packages.worksheets.classifier import QuestionClassifier
 from packages.worksheets.models import (
+    AnswerTargetSpec,
     ParsedQuestion,
     ParsedWorksheet,
     QuestionOption,
@@ -197,14 +198,33 @@ class DocxWorksheetParser(BaseWorksheetParser):
 
     # Regex patterns for question detection
     QUESTION_START_PATTERNS = [
-        # Activity with emoji / bullet (e.g. 🔹 1. Role-Play Simulation)
+        # Activity with name/separator (e.g. Activity 1 — Aspirations, Activity 2: Why Am I...)
+        re.compile(r"^[🔹🔸■•*►-]?\s*(?:Activity|Task|Exercise|Experiment)\s*([A-Za-z0-9\.\-_]+)[\s:\-–—]+(.+)", re.IGNORECASE | re.DOTALL),
+        # Assignment pattern (e.g. Home Assignment — What Is Required...)
+        re.compile(r"^(?:Home\s+Assignment|Assignment|Project\s+Task)[\s:\-–—]+(.+)", re.IGNORECASE | re.DOTALL),
+        # Question with Q/Question prefix (e.g. Q1. What is..., Question 2:, Q1. Using the sequence...)
+        re.compile(r"^Q(?:uestion)?\s*(\d+)[\.\):\-–—]\s*(.+)", re.IGNORECASE | re.DOTALL),
+        # Activity with number only (e.g. 🔹 1. Role-Play Simulation)
         re.compile(r"^[🔹🔸■•*►-]?\s*(?:Activity\s*)?(\d+)[\.\):]\s*(.+)", re.DOTALL),
-        # Question with Q/Question prefix (e.g. Q1. What is..., Question 2:)
-        re.compile(r"^Q(?:uestion)?\s*(\d+)[\.\):]\s*(.+)", re.IGNORECASE | re.DOTALL),
         # Standard numbering (e.g. 1. What is..., 1) Explain...)
         re.compile(r"^(\d+)[\.\)]\s+(.+)", re.DOTALL),
         # Bracketed numbering (e.g. [1] Define..., (1) State...)
         re.compile(r"^[\(\[](\d+)[\)\]]\s+(.+)", re.DOTALL),
+    ]
+
+    NON_QUESTION_SECTION_NAMES = [
+        "session learning outcomes",
+        "learning outcomes",
+        "course outcomes",
+        "the process",
+        "how to engage with this session",
+        "key ideas (recap)",
+        "key ideas",
+        "recap",
+        "prerequisites",
+        "instructions",
+        "general instructions",
+        "guidelines",
     ]
 
     # Option detection patterns (e.g. A. ..., a) ..., (A) ..., [B] ...)
@@ -319,12 +339,26 @@ class DocxWorksheetParser(BaseWorksheetParser):
 
         numbering_resolver = DocxNumberingResolver(doc)
 
-        for block_idx, block in enumerate(self._iter_block_items(doc)):
+        p_index = -1
+        t_index = -1
+
+        pending_empty_paragraphs: List[int] = []
+
+        for block in self._iter_block_items(doc):
             if isinstance(block, Paragraph):
+                p_index += 1
                 paragraph_count += 1
                 text = block.text.strip()
                 if not text:
+                    # Accumulate empty paragraph index while question is open
+                    if current_question:
+                        pending_empty_paragraphs.append(p_index)
                     continue
+
+                # Non-empty paragraph arrived: clear pending empty paragraphs if this is continuation
+                if pending_empty_paragraphs and current_question:
+                    # If this paragraph starts a new question or section, pending_empty_paragraphs will be attached below
+                    pass
 
                 # Ignore top-level metadata headers as sections
                 if self.UNIT_SESSION_SLO_PATTERN.search(text) or (
@@ -339,7 +373,6 @@ class DocxWorksheetParser(BaseWorksheetParser):
                         effective_text = f"{num_info.rendered_prefix} {text}"
 
                 # 1. Check for Section Headers
-                # Either explicit Heading style or Section regex
                 style_name = (block.style.name if block.style else "").lower()
                 is_heading_style = "heading" in style_name
                 sec_match = None
@@ -348,12 +381,19 @@ class DocxWorksheetParser(BaseWorksheetParser):
                     if sec_match:
                         break
 
-                if (is_heading_style and not self._match_question_start(effective_text)) or (sec_match and len(text) < 100):
+                is_q_start = bool(self._match_question_start(effective_text))
+                if not sec_match and not is_q_start:
+                    t_clean = text.lower()
+                    if any(t_clean.startswith(nq) for nq in self.NON_QUESTION_SECTION_NAMES):
+                        sec_match = True
+
+                if not is_q_start and ((is_heading_style) or (sec_match and len(text) < 100)):
                     # Finalize current question if open
                     if current_question:
-                        self._finalize_question(current_question)
-                        questions.append(current_question)
+                        self._finalize_pending_question(current_question, questions, pending_empty_paragraphs)
                         current_question = None
+                    else:
+                        pending_empty_paragraphs.clear()
 
                     sec_name = text
                     current_section = WorksheetSection(
@@ -363,6 +403,12 @@ class DocxWorksheetParser(BaseWorksheetParser):
                     )
                     sections.append(current_section)
                     continue
+
+                is_non_question_section = False
+                if current_section:
+                    c_sec_name = current_section.name.lower()
+                    if any(term in c_sec_name for term in self.NON_QUESTION_SECTION_NAMES):
+                        is_non_question_section = True
 
                 # 2. Check for Option if a question is currently open
                 if current_question:
@@ -374,8 +420,16 @@ class DocxWorksheetParser(BaseWorksheetParser):
 
                     # Check if this paragraph is an explicit answer placeholder
                     if is_answer_placeholder_text(text):
-                        current_question.source_location["answer_placeholder_paragraph_index"] = block_idx
+                        current_question.source_location["answer_placeholder_paragraph_index"] = p_index
                         current_question.formatting_metadata["answer_placeholder_text"] = text
+                        current_question.targets.append(
+                            AnswerTargetSpec(
+                                target_id=f"{current_question.question_id}_placeholder",
+                                target_type="PARAGRAPH_PLACEHOLDER",
+                                paragraph_index=p_index,
+                                expected_length="paragraph",
+                            )
+                        )
                         continue
 
                     # Check for Activity / Deliverable sub-parts (like in 1011.docx)
@@ -384,7 +438,6 @@ class DocxWorksheetParser(BaseWorksheetParser):
                         "Learning Objective:", "📌 Solution/Outcome:", "Solution/Outcome:",
                         "💡 Outcome:", "Outcome:", "Deliverable:", "Requirements:"
                     ]):
-                        # Append activity context / sub-part
                         if current_question.context_or_activity:
                             current_question.context_or_activity += f"\n{text}"
                         else:
@@ -395,13 +448,14 @@ class DocxWorksheetParser(BaseWorksheetParser):
                 q_match = self._match_question_start(effective_text)
                 if q_match:
                     if current_question:
-                        self._finalize_question(current_question)
-                        questions.append(current_question)
+                        self._finalize_pending_question(current_question, questions, pending_empty_paragraphs)
+                        current_question = None
+                    else:
+                        pending_empty_paragraphs.clear()
 
                     source_order += 1
                     q_num, q_body = q_match
 
-                    # Check for inline options
                     clean_body, inline_opts = QuestionClassifier.extract_inline_options(q_body)
                     extracted_marks = QuestionClassifier.extract_marks(clean_body)
 
@@ -414,25 +468,44 @@ class DocxWorksheetParser(BaseWorksheetParser):
                             "rendered_prefix": num_info.rendered_prefix,
                         }
 
+                    clean_qid = str(q_num).replace(" ", "_")
                     current_question = ParsedQuestion(
-                        question_id=f"q_{source_order}_{q_num}",
+                        question_id=f"q_{source_order}_{clean_qid}",
                         question_number=str(q_num),
                         question_text=clean_body,
                         options=inline_opts,
                         marks=extracted_marks,
                         section=current_section.name if current_section else None,
                         source_order=source_order,
-                        source_location={"paragraph_index": block_idx},
+                        source_location={"paragraph_index": p_index},
                         formatting_metadata=formatting_meta,
                     )
                     continue
 
                 # 4. Continuation of Current Question or Unclassified Text
                 if current_question:
-                    # If this is not metadata / top header, treat as continuation of question description
-                    current_question.question_text += f"\n{text}"
-                else:
-                    # Paragraph before any numbered question: could be standalone conceptual question or instruction
+                    if current_question.targets and ("?" in text or any(text.lower().startswith(v) for v in ("which", "what", "how", "explain", "compare"))):
+                        self._finalize_pending_question(current_question, questions, pending_empty_paragraphs)
+                        current_question = None
+                        source_order += 1
+                        extracted_marks = QuestionClassifier.extract_marks(text)
+                        clean_text, inline_opts = QuestionClassifier.extract_inline_options(text)
+                        current_question = ParsedQuestion(
+                            question_id=f"q_{source_order}",
+                            question_number=str(source_order),
+                            question_text=clean_text,
+                            options=inline_opts,
+                            marks=extracted_marks,
+                            section=current_section.name if current_section else None,
+                            source_order=source_order,
+                            source_location={"paragraph_index": p_index},
+                            formatting_metadata=self._extract_formatting(block),
+                        )
+                    else:
+                        pending_empty_paragraphs.clear()
+                        current_question.question_text += f"\n{text}"
+                elif not is_non_question_section:
+                    pending_empty_paragraphs.clear()
                     QUESTION_VERBS = (
                         "define", "explain", "state", "discuss", "write", "demonstrate",
                         "give", "implement", "describe", "illustrate", "differentiate",
@@ -454,37 +527,77 @@ class DocxWorksheetParser(BaseWorksheetParser):
                             marks=extracted_marks,
                             section=current_section.name if current_section else None,
                             source_order=source_order,
-                            source_location={"paragraph_index": block_idx},
+                            source_location={"paragraph_index": p_index},
                             formatting_metadata=self._extract_formatting(block),
                         )
 
             elif isinstance(block, Table):
+                t_index += 1
                 table_count += 1
-                # Finalize any pending paragraph question
-                if current_question:
-                    self._finalize_question(current_question)
-                    questions.append(current_question)
-                    current_question = None
 
-                # Process table for questions
+                # Check if this is a student header table
+                tbl_text_lower = " ".join(c.text.strip().lower() for row in block.rows for c in row.cells)
+                if any(term in tbl_text_lower for term in ["session", "lecture", "reg. no.", "reg no"]):
+                    metadata["header_table_index"] = t_index
+                    continue
+
+                # 1. Process standard question tables (where rows represent individual questions, e.g. Q.No | Question | Answer)
                 table_questions, is_q_table = self._parse_table_questions(
-                    block, table_idx=table_count - 1, start_order=source_order + 1, section=current_section
+                    block, table_idx=t_index, start_order=source_order + 1, section=current_section
                 )
                 if is_q_table and table_questions:
+                    if current_question:
+                        self._finalize_pending_question(current_question, questions, pending_empty_paragraphs)
+                        current_question = None
+
                     for tq in table_questions:
                         source_order += 1
                         tq.source_order = source_order
                         questions.append(tq)
+                    continue
+
+                # 2. Check if this table has blank cells forming an activity table
+                table_targets = self._extract_table_activity_targets(block, t_index)
+                if table_targets:
+                    tbl_md = self._table_to_markdown(block)
+                    if current_question:
+                        pending_empty_paragraphs.clear()
+                        current_question.targets.extend(table_targets)
+                        current_question.question_type = QuestionType.TABLE_CELL
+                        current_question.formatting_metadata["supplementary_table"] = tbl_md
+                        current_question.question_text += f"\n\n{tbl_md}"
+                        self._finalize_pending_question(current_question, questions, pending_empty_paragraphs)
+                        current_question = None
+                    else:
+                        source_order += 1
+                        current_question = ParsedQuestion(
+                            question_id=f"q_{source_order}_tbl{t_index}",
+                            question_number=f"Activity {source_order}",
+                            question_text=f"Complete the table:\n\n{tbl_md}",
+                            question_type=QuestionType.TABLE_CELL,
+                            section=current_section.name if current_section else None,
+                            source_order=source_order,
+                            source_location={"table_index": t_index},
+                            targets=table_targets,
+                            formatting_metadata={"supplementary_table": tbl_md},
+                        )
+                        self._finalize_pending_question(current_question, questions, pending_empty_paragraphs)
+                        current_question = None
+                    continue
+
+                # Finalize any pending paragraph question if table is non-question and non-activity
+                if current_question:
+                    self._finalize_pending_question(current_question, questions, pending_empty_paragraphs)
+                    current_question = None
                 elif questions:
-                    # If table is supplementary to the preceding question, attach it
                     tbl_md = self._table_to_markdown(block)
                     questions[-1].formatting_metadata["supplementary_table"] = tbl_md
                     questions[-1].question_text += f"\n\n{tbl_md}"
 
         # Finalize last open question
         if current_question:
-            self._finalize_question(current_question)
-            questions.append(current_question)
+            self._finalize_pending_question(current_question, questions, pending_empty_paragraphs)
+            current_question = None
 
         title = metadata.get("header_text") or (sections[0].name if sections else path.stem)
 
@@ -511,6 +624,8 @@ class DocxWorksheetParser(BaseWorksheetParser):
         for pattern in self.QUESTION_START_PATTERNS:
             match = pattern.match(text)
             if match:
+                if len(match.groups()) == 1:
+                    return "Assignment", match.group(1).strip()
                 q_num = match.group(1).strip()
                 q_body = match.group(2).strip()
                 # Don't treat a single letter option (e.g. A. B.) as question start
@@ -527,9 +642,44 @@ class DocxWorksheetParser(BaseWorksheetParser):
                 return opt_key, opt_text
         return None
 
+    def _finalize_pending_question(
+        self,
+        current_question: ParsedQuestion,
+        questions: List[ParsedQuestion],
+        pending_empty_paragraphs: List[int],
+    ) -> None:
+        """Attach trailing empty paragraphs if needed, classify, and add to question list."""
+        if pending_empty_paragraphs:
+            # If earlier questions exist and none of them had targets, a single trailing
+            # empty paragraph at EOF is just Word's default trailing newline, not an answer target.
+            is_isolated_eof = (
+                len(pending_empty_paragraphs) == 1
+                and len(questions) > 0
+                and not any(q.targets for q in questions)
+            )
+            if not is_isolated_eof and not current_question.targets:
+                target_id = f"{current_question.question_id}_p{pending_empty_paragraphs[0]}"
+                current_question.targets.append(
+                    AnswerTargetSpec(
+                        target_id=target_id,
+                        target_type="PARAGRAPH_EMPTY",
+                        paragraph_index=pending_empty_paragraphs[0],
+                        expected_length="short" if current_question.question_type in (QuestionType.SHORT_ANSWER, QuestionType.ONE_WORD) else "paragraph",
+                    )
+                )
+                if len(pending_empty_paragraphs) > 1:
+                    current_question.formatting_metadata["extra_empty_paragraphs"] = list(pending_empty_paragraphs[1:])
+            pending_empty_paragraphs.clear()
+
+        self._finalize_question(current_question)
+        questions.append(current_question)
+
     def _finalize_question(self, question: ParsedQuestion) -> None:
         """Classify and polish question before adding to question list."""
-        question.question_type = QuestionClassifier.classify(question)
+        if question.targets and any(t.target_type == "TABLE_CELL" for t in question.targets):
+            question.question_type = QuestionType.TABLE_CELL
+        else:
+            question.question_type = QuestionClassifier.classify(question)
 
     def _parse_table_questions(
         self,
@@ -643,3 +793,56 @@ class DocxWorksheetParser(BaseWorksheetParser):
             if r_idx == 0:
                 md_lines.append("| " + " | ".join(["---"] * len(row_texts)) + " |")
         return "\n".join(md_lines)
+
+    def _extract_table_activity_targets(self, table: Table, table_idx: int) -> List[AnswerTargetSpec]:
+        """Extract blank cells from an activity table along with column header semantics and row labels."""
+        if len(table.rows) < 2:
+            return []
+
+        headers = [c.text.strip().replace("\n", " ") for c in table.rows[0].cells]
+        if not any(headers):
+            return []
+
+        # Check if table has blank cells in data rows
+        blank_cells = 0
+        for row in table.rows[1:]:
+            for cell in row.cells:
+                if not cell.text.strip() or is_answer_placeholder_text(cell.text.strip()):
+                    blank_cells += 1
+
+        if blank_cells == 0:
+            return []
+
+        targets: List[AnswerTargetSpec] = []
+        for r_idx, row in enumerate(table.rows[1:], start=1):
+            row_label = ""
+            if row.cells and row.cells[0].text.strip():
+                first_txt = row.cells[0].text.strip()
+                if len(first_txt) < 80:
+                    row_label = first_txt
+
+            for c_idx, cell in enumerate(row.cells):
+                txt = cell.text.strip()
+                col_hdr = headers[c_idx] if c_idx < len(headers) else f"Column {c_idx+1}"
+                if not txt or is_answer_placeholder_text(txt):
+                    semantic = f"{col_hdr} for '{row_label}'" if row_label and c_idx > 0 else col_hdr
+                    exp_len = "phrase"
+                    if any(term in col_hdr.lower() for term in ["right understanding", "relationship", "facility", "yes", "no", "tick", "mark"]):
+                        exp_len = "mark"
+                    elif any(term in col_hdr.lower() for term in ["present effort", "become", "get", "be"]):
+                        exp_len = "phrase"
+                    targets.append(
+                        AnswerTargetSpec(
+                            target_id=f"tbl_{table_idx}_r{r_idx}_c{c_idx}",
+                            target_type="TABLE_CELL",
+                            table_index=table_idx,
+                            row_index=r_idx,
+                            col_index=c_idx,
+                            column_header=col_hdr,
+                            row_label=row_label if row_label else f"Row {r_idx}",
+                            semantic=semantic,
+                            expected_length=exp_len,
+                        )
+                    )
+
+        return targets

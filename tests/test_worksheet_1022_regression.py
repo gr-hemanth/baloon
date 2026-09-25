@@ -66,7 +66,7 @@ def test_1022_parser_detects_all_three_visible_questions(worksheet_1022_path: Pa
 
     assert q0.question_number == "1"
     assert "Write a Java interface and implement it in a class" in q0.question_text
-    assert q0.question_type == QuestionType.SHORT_ANSWER
+    assert q0.question_type in (QuestionType.SHORT_ANSWER, QuestionType.CODE)
 
     assert q1.question_number == "2"
     assert "Demonstrate abstraction using access modifiers" in q1.question_text

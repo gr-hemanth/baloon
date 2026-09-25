@@ -43,13 +43,16 @@ class AnswerTargetType(str, Enum):
     """Classification of writable answer target locations in DOCX documents."""
     PARAGRAPH_PLACEHOLDER = "PARAGRAPH_PLACEHOLDER"  # Existing paragraph containing "Answer:", "Ans:", etc.
     PARAGRAPH_BOX = "PARAGRAPH_BOX"                  # Bordered or designated empty paragraph for answer
+    PARAGRAPH_EMPTY = "PARAGRAPH_EMPTY"              # Designated empty paragraph for answer
     TABLE_CELL_COLUMN = "TABLE_CELL_COLUMN"          # Dedicated answer column in same row
     TABLE_CELL_ROW = "TABLE_CELL_ROW"                # Dedicated answer row below question (alternating/merged)
     TABLE_CELL_BLANK = "TABLE_CELL_BLANK"            # Blank or bordered cell in same row
+    TABLE_CELL_SPECIFIC = "TABLE_CELL_SPECIFIC"      # Exact resolved table cell matching target spec
     TABLE_CELL_APPEND = "TABLE_CELL_APPEND"          # Append inside question cell (when no dedicated cell)
     TEXT_BOX = "TEXT_BOX"                            # w:txbxContent element in DrawingML or VML
     CONTENT_CONTROL = "CONTENT_CONTROL"              # w:sdtContent structured document tag
     NEW_PARAGRAPH_ANCHOR = "NEW_PARAGRAPH_ANCHOR"    # Fallback: insert new paragraph after question block
+    MULTI_TARGET = "MULTI_TARGET"                    # Multiple sub-targets (e.g. table activity or multi-cell table)
 
 
 class AnswerTarget:
@@ -166,6 +169,48 @@ class AnswerTargetResolver:
         Raises:
             WorksheetFillingError: If no valid target can be resolved.
         """
+        # 0. Check if question has explicit table cell targets defined (from parser)
+        if question.targets and any(spec.target_type == "TABLE_CELL" for spec in question.targets):
+            sub_targets: List[AnswerTarget] = []
+            for spec in question.targets:
+                if spec.target_type == "TABLE_CELL":
+                    t_idx = spec.table_index
+                    r_idx = spec.row_index
+                    c_idx = spec.col_index
+                    if t_idx is not None and t_idx < len(doc.tables):
+                        table = doc.tables[t_idx]
+                        if r_idx is not None and r_idx < len(table.rows):
+                            row = table.rows[r_idx]
+                            if c_idx is not None and c_idx < len(row.cells):
+                                cell = row.cells[c_idx]
+                                sub_targets.append(
+                                    AnswerTarget(
+                                        question_id=question.question_id,
+                                        target_type=AnswerTargetType.TABLE_CELL_SPECIFIC,
+                                        table_index=t_idx,
+                                        row_index=r_idx,
+                                        col_index=c_idx,
+                                        cell_obj=cell,
+                                        is_explicit=True,
+                                        metadata={
+                                            "target_id": spec.target_id,
+                                            "semantic": spec.semantic,
+                                            "column_header": spec.column_header,
+                                            "row_label": spec.row_label,
+                                            "expected_length": spec.expected_length,
+                                        },
+                                    )
+                                )
+            if sub_targets:
+                if len(sub_targets) == 1:
+                    return sub_targets[0]
+                return AnswerTarget(
+                    question_id=question.question_id,
+                    target_type=AnswerTargetType.MULTI_TARGET,
+                    is_explicit=True,
+                    metadata={"sub_targets": sub_targets},
+                )
+
         table_loc = question.source_location.get("table_index")
         row_loc = question.source_location.get("row_index")
 
@@ -279,7 +324,28 @@ class AnswerTargetResolver:
             if text:
                 last_content_idx = idx
 
-        # 4. Fallback: No explicit placeholder found; insert directly after last question block
+        # 4. Check if there is an empty paragraph designated for answering following the question block
+        if last_content_idx + 1 < min(next_q_idx, len(doc.paragraphs)):
+            candidate_p = doc.paragraphs[last_content_idx + 1]
+            if not candidate_p.text.strip():
+                # Check if this is an isolated trailing empty paragraph at EOF in a document
+                # where earlier questions had no designated empty paragraphs
+                is_isolated_eof = (
+                    (last_content_idx + 1 == len(doc.paragraphs) - 1)
+                    and len(all_questions) > 1
+                    and any(oq.source_order < question.source_order for oq in all_questions)
+                    and not any(oq.targets for oq in all_questions if oq.question_id != question.question_id)
+                )
+                if not is_isolated_eof:
+                    return AnswerTarget(
+                        question_id=question.question_id,
+                        target_type=AnswerTargetType.PARAGRAPH_EMPTY,
+                        paragraph_index=last_content_idx + 1,
+                        paragraph_obj=candidate_p,
+                        is_explicit=True,
+                    )
+
+        # 5. Fallback: No explicit placeholder or blank line found; insert directly after last question block
         anchor_p = doc.paragraphs[last_content_idx]
         return AnswerTarget(
             question_id=question.question_id,
@@ -452,7 +518,17 @@ class TargetWriter:
         formatted_text = self._format_answer_text(question, answer)
         lines = formatted_text.splitlines()
 
-        if target.target_type == AnswerTargetType.PARAGRAPH_PLACEHOLDER:
+        if target.target_type == AnswerTargetType.MULTI_TARGET:
+            for sub_target in target.metadata.get("sub_targets", []):
+                self._write_sub_target(doc, sub_target, question, answer)
+
+        elif target.target_type == AnswerTargetType.PARAGRAPH_EMPTY:
+            self._write_paragraph_empty(target.paragraph_obj, lines, question)
+
+        elif target.target_type == AnswerTargetType.TABLE_CELL_SPECIFIC:
+            self._write_table_cell_specific(target.cell_obj, lines, target.metadata)
+
+        elif target.target_type == AnswerTargetType.PARAGRAPH_PLACEHOLDER:
             self._write_paragraph_placeholder(target.paragraph_obj, lines, target.placeholder_text)
 
         elif target.target_type == AnswerTargetType.PARAGRAPH_BOX:
@@ -496,7 +572,116 @@ class TargetWriter:
             # If answer text doesn't already include option letter prefix
             if not text.upper().startswith(opt_key):
                 return f"{opt_key}. {text}"
-        return text
+        return self._clean_humanized_text(text)
+
+    def _clean_humanized_text(self, text: str) -> str:
+        """Strip markdown markers (###, **, *), AI buzzwords, and redundant prefixes."""
+        t = text.strip()
+        t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)
+        t = re.sub(r"^#{1,6}\s*", "", t, flags=re.MULTILINE)
+        t = re.sub(r"^\s*[\*\-•]\s+", "", t, flags=re.MULTILINE)
+        t = re.sub(r"^(?:Answer|Ans|Solution)\s*[:\-–—]\s*", "", t, flags=re.IGNORECASE).strip()
+        return t
+
+    def _write_sub_target(
+        self,
+        doc: docx.Document,
+        sub_target: AnswerTarget,
+        question: ParsedQuestion,
+        answer: GeneratedAnswer,
+    ) -> None:
+        """Write into an individual sub-target within a multi-target question."""
+        target_id = sub_target.metadata.get("target_id", "")
+        text = ""
+        if answer.target_answers and target_id in answer.target_answers:
+            text = answer.target_answers[target_id]
+        elif answer.target_answers:
+            for k, v in answer.target_answers.items():
+                if k in target_id or target_id.endswith(k):
+                    text = v
+                    break
+        if not text:
+            text = answer.answer_text
+
+        text = self._clean_humanized_text(text)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+        if sub_target.target_type in (
+            AnswerTargetType.TABLE_CELL_SPECIFIC,
+            AnswerTargetType.TABLE_CELL_COLUMN,
+            AnswerTargetType.TABLE_CELL_BLANK,
+        ):
+            self._write_table_cell_specific(sub_target.cell_obj, lines, sub_target.metadata)
+        elif sub_target.target_type == AnswerTargetType.PARAGRAPH_EMPTY:
+            self._write_paragraph_empty(sub_target.paragraph_obj, lines, question)
+        elif sub_target.target_type == AnswerTargetType.PARAGRAPH_PLACEHOLDER:
+            self._write_paragraph_placeholder(sub_target.paragraph_obj, lines, sub_target.placeholder_text)
+
+    def _write_table_cell_specific(self, cell: _Cell, lines: List[str], metadata: Dict[str, Any]) -> None:
+        """Write concise answer cleanly into a specific table cell without any 'Answer:' prefix."""
+        p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
+        p.text = ""
+        if not lines:
+            return
+
+        txt = lines[0]
+        txt = re.sub(r"^(?:Answer|Ans|Solution)\s*[:\-–—]\s*", "", txt, flags=re.IGNORECASE).strip()
+        r = p.add_run(txt)
+        r.font.size = Pt(9.5)
+        r.font.color.rgb = ANSWER_COLOR_RGB
+
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            np = cell.add_paragraph()
+            r2 = np.add_run(line.strip())
+            r2.font.size = Pt(9.5)
+            r2.font.color.rgb = ANSWER_COLOR_RGB
+
+    def _write_paragraph_empty(self, p: Paragraph, lines: List[str], question: ParsedQuestion) -> None:
+        """Write answer cleanly into designated empty paragraph(s) without spurious headers."""
+        p.text = ""
+        if not lines:
+            return
+
+        is_code = question.question_type == QuestionType.CODE
+        first = True
+        current_p = p
+        parent_doc = p._parent
+
+        for line in lines:
+            if not line.strip():
+                continue
+            if first:
+                run = current_p.add_run(line)
+                first = False
+            else:
+                # Check if immediate next sibling is an existing empty paragraph we can reuse
+                next_elm = current_p._p.getnext()
+                is_reusable_empty_p = False
+                if next_elm is not None and next_elm.tag.endswith("p"):
+                    t_nodes = next_elm.findall(".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")
+                    if not any(t.text and t.text.strip() for t in t_nodes):
+                        is_reusable_empty_p = True
+
+                if is_reusable_empty_p:
+                    cont_p = Paragraph(next_elm, parent_doc)
+                    cont_p.text = ""
+                    run = cont_p.add_run(line)
+                    current_p = cont_p
+                else:
+                    new_p_elm = current_p._p.getparent()._new_p()
+                    current_p._p.addnext(new_p_elm)
+                    cont_p = Paragraph(new_p_elm, parent_doc)
+                    run = cont_p.add_run(line)
+                    current_p = cont_p
+
+            if is_code:
+                run.font.name = "Consolas"
+                run.font.size = Pt(9.5)
+            else:
+                run.font.size = Pt(10.5)
+            run.font.color.rgb = ANSWER_COLOR_RGB
 
     def _write_paragraph_placeholder(
         self,

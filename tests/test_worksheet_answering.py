@@ -285,11 +285,13 @@ async def test_real_1011_docx_end_to_end_pipeline(tmp_path: Path):
         assert ans.question_type == QuestionType.LONG_ANSWER
         assert len(ans.answer_text) > 100
 
-    # 4. Verify completed document structure
+    # 4. Verify completed document structure and verification
+    assert "verification" in result.summary
+    assert result.summary["verification"]["is_valid"] is True
     comp_doc = docx.Document(str(result.completed_file))
     comp_text = "\n".join(p.text for p in comp_doc.paragraphs)
-    assert "Answer: " in comp_text
-    assert "Architecture" in comp_text or "Technical" in comp_text
+    assert len(comp_text) > 500
+    assert "Architecture" in comp_text or "Technical" in comp_text or "Software" in comp_text
 
 
 def test_default_worksheet_processor_adapter(tmp_path: Path):

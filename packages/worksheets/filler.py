@@ -22,7 +22,9 @@ from packages.worksheets.answer_target import (
     AnswerTargetResolver,
     TargetWriter,
 )
+from packages.worksheets.header_filler import StudentHeaderFiller
 from packages.worksheets.models import ParsedWorksheet
+from packages.worksheets.verification import PhysicalDocumentVerifier, VerificationReport
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +32,11 @@ logger = logging.getLogger(__name__)
 class DocxWorksheetFiller:
     """Fills a DOCX worksheet with answers, saving to a new identifiable completed file."""
 
-    def __init__(self):
+    def __init__(self, student_info: Optional[dict] = None):
         self.resolver = AnswerTargetResolver()
         self.writer = TargetWriter()
+        self.header_filler = StudentHeaderFiller(student_info)
+        self.last_verification: Optional[VerificationReport] = None
 
     def fill(
         self,
@@ -83,6 +87,9 @@ class DocxWorksheetFiller:
         # Open in memory
         doc = docx.Document(str(orig_path))
 
+        # 0. Fill Student Identification Metadata (Name, Reg. No., Branch, Date)
+        self.header_filler.fill_header(doc)
+
         # Process each question using generic answer-target resolution
         for question in worksheet.questions:
             answer = answers.get_answer(question.question_id)
@@ -117,9 +124,19 @@ class DocxWorksheetFiller:
                 "Original documents must remain immutable."
             )
 
+        # 3. Comprehensive Physical XML & Document Structure Verification
+        self.last_verification = PhysicalDocumentVerifier.verify(
+            original_path=orig_path,
+            completed_path=completed_path,
+            original_hash_before=hash_before,
+            worksheet=worksheet,
+            answers=answers,
+        )
+
         logger.info(
-            "Successfully completed worksheet saved to %s (Original intact: %s)",
+            "Successfully completed worksheet saved to %s (Original intact: %s, Valid: %s)",
             completed_path,
             orig_path.name,
+            self.last_verification.is_valid,
         )
         return completed_path

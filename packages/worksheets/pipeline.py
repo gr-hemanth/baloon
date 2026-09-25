@@ -70,6 +70,9 @@ class WorksheetPipeline:
         )
 
         # 3. Fill Document Copy
+        if context and "student_info" in context:
+            self.filler.header_filler = StudentHeaderFiller(context["student_info"])
+
         completed_file = self.filler.fill(
             original_file_path=path,
             worksheet=parsed_worksheet,
@@ -88,13 +91,27 @@ class WorksheetPipeline:
             "success_count": answers.success_count,
             "average_confidence": round(answers.average_confidence, 3),
             "provider": answers.provider,
+            "verification": (
+                self.filler.last_verification.model_dump()
+                if self.filler.last_verification
+                else None
+            ),
+            "verification_summary": (
+                self.filler.last_verification.to_summary_str()
+                if self.filler.last_verification
+                else None
+            ),
         }
+
+        is_valid = True
+        if self.filler.last_verification:
+            is_valid = self.filler.last_verification.is_valid
 
         return PipelineResult(
             original_file=path,
             completed_file=completed_file,
             worksheet=parsed_worksheet,
             answers=answers,
-            success=answers.success_count > 0 or parsed_worksheet.question_count == 0,
+            success=(answers.success_count > 0 or parsed_worksheet.question_count == 0) and is_valid,
             summary=summary,
         )

@@ -13,9 +13,32 @@ class QuestionType(str, Enum):
     """Classification of worksheet questions."""
     MCQ = "MCQ"
     ONE_WORD = "ONE_WORD"
+    FILL_IN_BLANK = "FILL_IN_BLANK"
+    TABLE_CELL = "TABLE_CELL"
     SHORT_ANSWER = "SHORT_ANSWER"
     LONG_ANSWER = "LONG_ANSWER"
+    CODE = "CODE"
+    PSEUDOCODE = "PSEUDOCODE"
+    OUTPUT_TRACING = "OUTPUT_TRACING"
+    COMPARISON_TABLE = "COMPARISON_TABLE"
+    TICK_SELECT = "TICK_SELECT"
     UNKNOWN = "UNKNOWN"
+
+
+class AnswerTargetSpec(BaseModel):
+    """Specification of an individual answer target within a question or activity."""
+    target_id: str
+    target_type: str = "table_cell"  # "table_cell", "paragraph_empty", "paragraph_placeholder", "text_box", "content_control"
+    table_index: Optional[int] = None
+    row_index: Optional[int] = None
+    col_index: Optional[int] = None
+    paragraph_index: Optional[int] = None
+    column_header: Optional[str] = None
+    row_label: Optional[str] = None
+    semantic: Optional[str] = None
+    expected_length: Optional[str] = "phrase"  # "word", "phrase", "sentence", "paragraph", "code"
+    approx_width: Optional[float] = None
+    existing_value: Optional[str] = None
 
 
 class QuestionOption(BaseModel):
@@ -41,6 +64,7 @@ class ParsedQuestion(BaseModel):
     formatting_metadata: Dict[str, Any] = Field(default_factory=dict)
     sub_parts: List["ParsedQuestion"] = Field(default_factory=list)
     context_or_activity: Optional[str] = None
+    targets: List[AnswerTargetSpec] = Field(default_factory=list)
 
 
 class WorksheetSection(BaseModel):
