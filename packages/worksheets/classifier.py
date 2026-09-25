@@ -12,9 +12,193 @@ without requiring external AI API calls.
 """
 
 import re
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from packages.worksheets.models import ParsedQuestion, QuestionOption, QuestionType
+from packages.worksheets.models import (
+    ParsedQuestion,
+    QuestionOption,
+    QuestionType,
+    ResponseMode,
+)
+
+
+class CodeIntentDetector:
+    """Semantic and syntax-based detector to identify code intent and programming language."""
+
+    # Explicit implementation verbs that indicate writing code/implementation
+    CODE_IMPL_VERBS = [
+        re.compile(r"\b(?:write|implement|code|program|develop|design|construct|create|build)\b", re.IGNORECASE),
+        re.compile(r"\b(?:override|overload|inherit|extend|instantiate|declare|modify|convert)\b", re.IGNORECASE),
+        re.compile(r"\bdemonstrate\s+(?:using|with|by)\s+code\b", re.IGNORECASE),
+        re.compile(r"\bcomplete\s+(?:the\s+)?(?:code|function|class|method)\b", re.IGNORECASE),
+    ]
+
+    # Explicit explanation / theory verbs
+    EXPLANATION_VERBS = [
+        re.compile(r"\b(?:explain|describe|discuss|elaborate|clarify|detail)\b", re.IGNORECASE),
+        re.compile(r"\b(?:use\s+of|significance\s+of|purpose\s+of|role\s+of)\b", re.IGNORECASE),
+    ]
+
+    # Pure theory prompts (questions that begin with or focus exclusively on theory)
+    PURE_THEORY_STARTERS = [
+        re.compile(r"^(?:explain|what\s+is|what\s+are|define|state|list|compare|differentiate|distinguish|discuss|elaborate|write\s+a\s+short\s+note|briefly\s+explain|give\s+(?:two|three|any|\d+))\b", re.IGNORECASE),
+    ]
+
+    # Programming entities / constructs
+    PROGRAMMING_CONSTRUCTS = [
+        re.compile(r"\b(?:class\s+hierarchy|superclass|subclass|base\s+class|derived\s+class)\b", re.IGNORECASE),
+        re.compile(r"\b(?:class|interface|abstract\s+class|constructor|method|function)\b", re.IGNORECASE),
+        re.compile(r"\b(?:inheritance|polymorphism|encapsulation|overriding|overloading)\b", re.IGNORECASE),
+        re.compile(r"\b(?:super|this|extends|implements|try-catch|exception|pointer|struct)\b", re.IGNORECASE),
+        re.compile(r"\b(?:linked\s+list|binary\s+tree|stack|queue|hashmap|arraylist|array)\b", re.IGNORECASE),
+        re.compile(r"\b(?:sql\s+query|select\s+query|stored\s+procedure|schema|table)\b", re.IGNORECASE),
+    ]
+
+    # Algorithm / Pseudocode / Output trace patterns
+    ALGORITHM_PATTERNS = [
+        re.compile(r"\b(?:write|develop|give|provide)\s+(?:an?\s+)?algorithm\b", re.IGNORECASE),
+        re.compile(r"\balgorithm\s+(?:to|for)\b", re.IGNORECASE),
+    ]
+
+    PSEUDOCODE_PATTERNS = [
+        re.compile(r"\bpseudo-?code\b", re.IGNORECASE),
+    ]
+
+    OUTPUT_TRACE_PATTERNS = [
+        re.compile(r"\b(?:what\s+is\s+the\s+output|predict\s+the\s+output|find\s+the\s+output|give\s+the\s+output)\b", re.IGNORECASE),
+        re.compile(r"\btrace\s+the\s+(?:execution|output|code|variable)\b", re.IGNORECASE),
+        re.compile(r"\boutput\s+of\s+the\s+following\b", re.IGNORECASE),
+    ]
+
+    # Language patterns
+    LANGUAGE_PATTERNS = [
+        ("java", re.compile(r"\bjava\b", re.IGNORECASE)),
+        ("python", re.compile(r"\bpython\b", re.IGNORECASE)),
+        ("cpp", re.compile(r"\b(?:c\+\+|cpp)\b", re.IGNORECASE)),
+        ("csharp", re.compile(r"\b(?:c#|csharp)\b", re.IGNORECASE)),
+        ("c", re.compile(r"\b(?:c\s+program(?:ming)?|using\s+c\b|in\s+c\b|c\s+language)\b", re.IGNORECASE)),
+        ("sql", re.compile(r"\b(?:sql|query|queries|relational\s+database)\b", re.IGNORECASE)),
+        ("javascript", re.compile(r"\b(?:javascript|js)\b", re.IGNORECASE)),
+        ("typescript", re.compile(r"\b(?:typescript|ts)\b", re.IGNORECASE)),
+        ("html", re.compile(r"\bhtml\b", re.IGNORECASE)),
+        ("css", re.compile(r"\bcss\b", re.IGNORECASE)),
+    ]
+
+    @classmethod
+    def detect_language(
+        cls,
+        text: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Detect the programming language from question text or course/worksheet context."""
+        ctx = context or {}
+        # 1. Direct match in question text
+        for lang_name, pattern in cls.LANGUAGE_PATTERNS:
+            if pattern.search(text):
+                return lang_name
+
+        # 2. Context checks (course_code, course_name, metadata)
+        course_code = str(ctx.get("course_code") or "").upper()
+        course_name = str(ctx.get("title") or ctx.get("course_name") or "").lower()
+
+        if "21CSC203P" in course_code or "CSC203" in course_code:
+            return "java"
+        if "java" in course_name:
+            return "java"
+        if "python" in course_name:
+            return "python"
+        if "c programming" in course_name or "problem solving using c" in course_name:
+            return "c"
+        if "sql" in course_name or "database" in course_name or "dbms" in course_name:
+            return "sql"
+
+        if ctx.get("language"):
+            return str(ctx["language"]).lower()
+
+        return None
+
+    @classmethod
+    def detect(
+        cls,
+        text: str,
+        context: Optional[Dict[str, Any]] = None,
+        question_type: Optional[QuestionType] = None,
+        has_table_targets: bool = False,
+        has_targets: bool = False,
+    ) -> Tuple[ResponseMode, Optional[str]]:
+        """Detect the response mode and target programming language for a question."""
+        ctx = context or {}
+        detected_lang = cls.detect_language(text, ctx)
+
+        # If question has table cell targets or is TABLE_CELL type
+        if has_table_targets or question_type == QuestionType.TABLE_CELL:
+            return ResponseMode.TABLE_VALUE, detected_lang
+
+        # MCQ / ONE_WORD are text-only responses
+        if question_type in (QuestionType.MCQ, QuestionType.ONE_WORD, QuestionType.FILL_IN_BLANK, QuestionType.TICK_SELECT):
+            return ResponseMode.TEXT, detected_lang
+
+        clean_text = text.strip()
+
+        # 1. Output Tracing
+        if any(p.search(clean_text) for p in cls.OUTPUT_TRACE_PATTERNS):
+            return ResponseMode.OUTPUT_TRACE, detected_lang
+
+        # 2. Algorithm
+        if any(p.search(clean_text) for p in cls.ALGORITHM_PATTERNS):
+            return ResponseMode.ALGORITHM, detected_lang
+
+        # 3. Pseudocode
+        if any(p.search(clean_text) for p in cls.PSEUDOCODE_PATTERNS):
+            return ResponseMode.PSEUDOCODE, detected_lang
+
+        # 4. Check for class hierarchy arrow patterns (e.g. Vehicle → Car → ElectricCar)
+        has_named_class_arrow = bool(re.search(
+            r"\b[A-Z][A-Za-z0-9_]*\s*(?:→|->|-->)\s*[A-Z][A-Za-z0-9_]*",
+            clean_text,
+        ))
+        has_generic_arrow = bool(re.search(r"\b[A-Za-z0-9_]+\s*(?:→|->|-->)\s*[A-Za-z0-9_]+", clean_text))
+        has_class_concept = any(p.search(clean_text) for p in cls.PROGRAMMING_CONSTRUCTS)
+        has_arrow_hierarchy = has_named_class_arrow or (has_generic_arrow and has_class_concept)
+
+        # 5. Check for implementation verbs
+        has_impl_verb = any(p.search(clean_text) for p in cls.CODE_IMPL_VERBS)
+        has_explanation = any(p.search(clean_text) for p in cls.EXPLANATION_VERBS)
+
+        # 6. Check for pure theory starters
+        starts_pure_theory = any(p.search(clean_text) for p in cls.PURE_THEORY_STARTERS)
+
+        # If question starts with pure theory ("Explain...", "What is...", "Define...", "Compare...")
+        # Check if it ALSO contains an explicit implementation instruction:
+        # e.g. "Explain method overriding and implement an example in Java."
+        has_explicit_impl_clause = bool(re.search(
+            r"\b(?:and\s+)?(?:implement|write\s+(?:a\s+)?(?:program|code|class)|create\s+a\s+class|demonstrate\s+using\s+code)\b",
+            clean_text,
+            re.IGNORECASE,
+        ))
+
+        # Check course default language if programming constructs are present
+        course_code = str(ctx.get("course_code") or "").upper()
+        if (not detected_lang) and ("21CSC203P" in course_code or "CSC203" in course_code):
+            detected_lang = "java"
+
+        if starts_pure_theory and not has_explicit_impl_clause:
+            # Pure theory question (e.g. "Explain inheritance in Java", "What is polymorphism?", "Compare abstract class and interface")
+            return ResponseMode.TEXT, detected_lang
+
+        if has_arrow_hierarchy or (has_impl_verb and has_class_concept) or has_explicit_impl_clause:
+            # Explicit code implementation requested!
+            if has_explanation:
+                return ResponseMode.CODE_AND_EXPLANATION, detected_lang or "java"
+            return ResponseMode.CODE, detected_lang or "java"
+
+        # If question type was classified as CODE
+        if question_type == QuestionType.CODE:
+            if has_explanation:
+                return ResponseMode.CODE_AND_EXPLANATION, detected_lang or "java"
+            return ResponseMode.CODE, detected_lang or "java"
+
+        return ResponseMode.TEXT, detected_lang
 
 
 class QuestionClassifier:
@@ -154,7 +338,11 @@ class QuestionClassifier:
         return text, []
 
     @classmethod
-    def classify(cls, question: ParsedQuestion) -> QuestionType:
+    def classify(
+        cls,
+        question: ParsedQuestion,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> QuestionType:
         """Classify a ParsedQuestion domain object based on its attributes."""
         # Check if marks are already on the question or extractable from text
         marks = question.marks
@@ -163,13 +351,58 @@ class QuestionClassifier:
             if marks is not None:
                 question.marks = marks
 
-        return cls.classify_raw(
+        qtype = cls.classify_raw(
             text=question.question_text,
             options=question.options,
             marks=marks,
             section=question.section,
             context=question.context_or_activity,
         )
+
+        ctx = dict(context or {})
+        if question.formatting_metadata:
+            ctx.update(question.formatting_metadata)
+
+        has_table_targets = bool(
+            question.targets and any(
+                str(getattr(t, "target_type", "")).upper().startswith("TABLE")
+                for t in question.targets
+            )
+        )
+        resp_mode, lang = CodeIntentDetector.detect(
+            text=question.question_text,
+            context=ctx,
+            question_type=qtype,
+            has_table_targets=has_table_targets,
+            has_targets=bool(question.targets),
+        )
+        question.response_mode = resp_mode
+        if lang:
+            question.language = lang
+
+        # Determine available_space
+        if question.targets:
+            first_t = question.targets[0]
+            if first_t.target_type == "table_cell" or (first_t.expected_length in ("word", "phrase", "short")):
+                question.available_space = "compact"
+            else:
+                question.available_space = "complete"
+        elif qtype in (QuestionType.ONE_WORD, QuestionType.FILL_IN_BLANK):
+            question.available_space = "compact"
+        else:
+            question.available_space = "complete"
+
+        question.question_type = qtype
+        return qtype
+
+    @classmethod
+    def detect_code_intent(
+        cls,
+        text: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[ResponseMode, Optional[str]]:
+        """Convenience method delegating to CodeIntentDetector."""
+        return CodeIntentDetector.detect(text, context=context)
 
     @classmethod
     def classify_raw(

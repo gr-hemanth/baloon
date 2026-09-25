@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
-from packages.worksheets.models import ParsedWorksheet, QuestionType
+from packages.worksheets.models import ParsedWorksheet, QuestionType, ResponseMode
 
 
 class AnswerStatus(str, Enum):
@@ -22,6 +22,8 @@ class GeneratedAnswer(BaseModel):
     question_id: str
     question_number: Optional[str] = None
     question_type: QuestionType = QuestionType.UNKNOWN
+    response_mode: Optional[ResponseMode] = None
+    language: Optional[str] = None
     answer_text: str
     selected_option: Optional[str] = None  # e.g., "A", "B", "C", "D"
     confidence: float = 1.0  # 0.0 to 1.0
@@ -30,6 +32,16 @@ class GeneratedAnswer(BaseModel):
     status: AnswerStatus = AnswerStatus.SUCCESS
     error_message: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    def __init__(self, **data: Any):
+        if "answer" in data and "answer_text" not in data:
+            data["answer_text"] = data.pop("answer")
+        super().__init__(**data)
+
+    @property
+    def answer(self) -> str:
+        """Alias for answer_text for backward compatibility."""
+        return self.answer_text
 
     def is_reliable(self, threshold: float = 0.5) -> bool:
         """Check if the answer was generated with sufficient confidence."""

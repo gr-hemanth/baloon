@@ -25,6 +25,17 @@ class QuestionType(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class ResponseMode(str, Enum):
+    """Presentation or generation mode required for an answer."""
+    TEXT = "TEXT"
+    CODE = "CODE"
+    CODE_AND_EXPLANATION = "CODE_AND_EXPLANATION"
+    ALGORITHM = "ALGORITHM"
+    PSEUDOCODE = "PSEUDOCODE"
+    OUTPUT_TRACE = "OUTPUT_TRACE"
+    TABLE_VALUE = "TABLE_VALUE"
+
+
 class AnswerTargetSpec(BaseModel):
     """Specification of an individual answer target within a question or activity."""
     target_id: str
@@ -56,6 +67,9 @@ class ParsedQuestion(BaseModel):
     question_number: Optional[str] = None  # e.g. "1", "1.a", "Q2", "Part A - 1"
     question_text: str
     question_type: QuestionType = QuestionType.UNKNOWN
+    response_mode: ResponseMode = ResponseMode.TEXT
+    language: Optional[str] = None
+    available_space: Optional[str] = None
     options: List[QuestionOption] = Field(default_factory=list)
     marks: Optional[float] = None
     section: Optional[str] = None

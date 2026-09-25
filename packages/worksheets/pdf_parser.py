@@ -16,6 +16,7 @@ from packages.worksheets.models import (
     ParsedQuestion,
     ParsedWorksheet,
     QuestionOption,
+    ResponseMode,
     WorksheetSection,
 )
 
@@ -165,6 +166,14 @@ class PdfWorksheetParser(BaseWorksheetParser):
             self._finalize_question(current_question)
             questions.append(current_question)
 
+        ws_course_code = metadata.get("course_code")
+        if ws_course_code:
+            for q in questions:
+                if not q.language and q.response_mode in (ResponseMode.CODE, ResponseMode.CODE_AND_EXPLANATION):
+                    q.language = QuestionClassifier.detect_code_intent(
+                        q.question_text, context={"course_code": ws_course_code}
+                    )[1]
+
         title = metadata.get("header_text") or (sections[0].name if sections else path.stem)
 
         return ParsedWorksheet(
@@ -202,6 +211,10 @@ class PdfWorksheetParser(BaseWorksheetParser):
                 return opt_key, opt_text
         return None
 
-    def _finalize_question(self, question: ParsedQuestion) -> None:
+    def _finalize_question(
+        self,
+        question: ParsedQuestion,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Classify question before appending."""
-        question.question_type = QuestionClassifier.classify(question)
+        question.question_type = QuestionClassifier.classify(question, context=context)

@@ -19,7 +19,7 @@ from docx.text.paragraph import Paragraph
 
 from packages.worksheets.answer_models import GeneratedAnswer
 from packages.worksheets.exceptions import WorksheetFillingError
-from packages.worksheets.models import ParsedQuestion, QuestionType
+from packages.worksheets.models import ParsedQuestion, QuestionType, ResponseMode
 
 logger = logging.getLogger(__name__)
 
@@ -514,35 +514,42 @@ class TargetWriter:
             question: The ParsedQuestion being answered.
             answer: Generated solution.
         """
-        # Format answer text based on question type
+        is_code = self._is_code_answer(question, answer)
         formatted_text = self._format_answer_text(question, answer)
-        lines = formatted_text.splitlines()
+        if is_code:
+            lines = [line.rstrip() for line in formatted_text.splitlines()]
+            while lines and not lines[0].strip():
+                lines.pop(0)
+            while lines and not lines[-1].strip():
+                lines.pop()
+        else:
+            lines = [line.strip() for line in formatted_text.splitlines() if line.strip()]
 
         if target.target_type == AnswerTargetType.MULTI_TARGET:
             for sub_target in target.metadata.get("sub_targets", []):
                 self._write_sub_target(doc, sub_target, question, answer)
 
         elif target.target_type == AnswerTargetType.PARAGRAPH_EMPTY:
-            self._write_paragraph_empty(target.paragraph_obj, lines, question)
+            self._write_paragraph_empty(target.paragraph_obj, lines, question, is_code=is_code)
 
         elif target.target_type == AnswerTargetType.TABLE_CELL_SPECIFIC:
-            self._write_table_cell_specific(target.cell_obj, lines, target.metadata)
+            self._write_table_cell_specific(target.cell_obj, lines, target.metadata, is_code=is_code)
 
         elif target.target_type == AnswerTargetType.PARAGRAPH_PLACEHOLDER:
-            self._write_paragraph_placeholder(target.paragraph_obj, lines, target.placeholder_text)
+            self._write_paragraph_placeholder(target.paragraph_obj, lines, target.placeholder_text, is_code=is_code)
 
         elif target.target_type == AnswerTargetType.PARAGRAPH_BOX:
-            self._write_paragraph_box(target.paragraph_obj, lines)
+            self._write_paragraph_box(target.paragraph_obj, lines, is_code=is_code)
 
         elif target.target_type in (
             AnswerTargetType.TABLE_CELL_COLUMN,
             AnswerTargetType.TABLE_CELL_ROW,
             AnswerTargetType.TABLE_CELL_BLANK,
         ):
-            self._write_table_cell(target.cell_obj, lines, target.placeholder_text)
+            self._write_table_cell(target.cell_obj, lines, target.placeholder_text, is_code=is_code)
 
         elif target.target_type == AnswerTargetType.TABLE_CELL_APPEND:
-            self._write_table_cell_append(target.cell_obj, lines)
+            self._write_table_cell_append(target.cell_obj, lines, is_code=is_code)
 
         elif target.target_type == AnswerTargetType.TEXT_BOX:
             self._write_text_box(doc, target.txbx_element, lines)
@@ -560,8 +567,34 @@ class TargetWriter:
         if question.question_type == QuestionType.MCQ and answer.selected_option:
             self._highlight_mcq_option(doc, question, answer.selected_option)
 
+    def _is_code_answer(self, question: ParsedQuestion, answer: GeneratedAnswer) -> bool:
+        """Determine whether answer should be rendered with code styling."""
+        resp_mode = getattr(answer, "response_mode", None) or getattr(question, "response_mode", None)
+        if resp_mode in (ResponseMode.CODE, ResponseMode.CODE_AND_EXPLANATION):
+            return True
+        return question.question_type == QuestionType.CODE
+
+    def _style_line_run(
+        self,
+        paragraph: Paragraph,
+        run,
+        line: str,
+        is_code: bool,
+        is_code_line: bool,
+    ) -> None:
+        """Apply font, size, and paragraph spacing according to code or text mode."""
+        if is_code_line:
+            run.font.name = "Consolas"
+            run.font.size = Pt(9.0)
+            paragraph.paragraph_format.space_after = Pt(1.5)
+            paragraph.paragraph_format.line_spacing = 1.15
+        else:
+            run.font.size = Pt(10.0 if is_code else 10.5)
+        run.font.color.rgb = ANSWER_COLOR_RGB
+
     def _format_answer_text(self, question: ParsedQuestion, answer: GeneratedAnswer) -> str:
         """Format answer text cleanly based on classification."""
+        is_code = self._is_code_answer(question, answer)
         text = answer.answer_text.strip()
 
         # Remove redundant leading "Answer:" or "Ans:" from answer engine output if present
@@ -572,14 +605,29 @@ class TargetWriter:
             # If answer text doesn't already include option letter prefix
             if not text.upper().startswith(opt_key):
                 return f"{opt_key}. {text}"
-        return self._clean_humanized_text(text)
+        return self._clean_humanized_text(text, is_code=is_code)
 
-    def _clean_humanized_text(self, text: str) -> str:
+    @staticmethod
+    def _clear_paragraph(p: Paragraph) -> None:
+        """Clear all runs and text from a paragraph without leaving an unstyled empty run."""
+        p.text = ""
+        while p.runs:
+            r = p.runs[0]
+            if r._r.getparent() is not None:
+                r._r.getparent().remove(r._r)
+            else:
+                break
+
+    def _clean_humanized_text(self, text: str, is_code: bool = False) -> str:
         """Strip markdown markers (###, **, *), AI buzzwords, and redundant prefixes."""
         t = text.strip()
-        t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)
-        t = re.sub(r"^#{1,6}\s*", "", t, flags=re.MULTILINE)
-        t = re.sub(r"^\s*[\*\-•]\s+", "", t, flags=re.MULTILINE)
+        # Clean markdown code fences if present
+        t = re.sub(r"^```[a-zA-Z0-9_-]*\s*\n?", "", t, flags=re.MULTILINE)
+        t = re.sub(r"\n?```\s*$", "", t, flags=re.MULTILINE)
+        if not is_code:
+            t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)
+            t = re.sub(r"^#{1,6}\s*", "", t, flags=re.MULTILINE)
+            t = re.sub(r"^\s*[\*\-•]\s+", "", t, flags=re.MULTILINE)
         t = re.sub(r"^(?:Answer|Ans|Solution)\s*[:\-–—]\s*", "", t, flags=re.IGNORECASE).strip()
         return t
 
@@ -603,57 +651,91 @@ class TargetWriter:
         if not text:
             text = answer.answer_text
 
-        text = self._clean_humanized_text(text)
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        is_code = self._is_code_answer(question, answer)
+        text = self._clean_humanized_text(text, is_code=is_code)
+        if is_code:
+            lines = [line.rstrip() for line in text.splitlines()]
+            while lines and not lines[0].strip():
+                lines.pop(0)
+            while lines and not lines[-1].strip():
+                lines.pop()
+        else:
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
 
         if sub_target.target_type in (
             AnswerTargetType.TABLE_CELL_SPECIFIC,
             AnswerTargetType.TABLE_CELL_COLUMN,
             AnswerTargetType.TABLE_CELL_BLANK,
         ):
-            self._write_table_cell_specific(sub_target.cell_obj, lines, sub_target.metadata)
+            self._write_table_cell_specific(sub_target.cell_obj, lines, sub_target.metadata, is_code=is_code)
         elif sub_target.target_type == AnswerTargetType.PARAGRAPH_EMPTY:
-            self._write_paragraph_empty(sub_target.paragraph_obj, lines, question)
+            self._write_paragraph_empty(sub_target.paragraph_obj, lines, question, is_code=is_code)
         elif sub_target.target_type == AnswerTargetType.PARAGRAPH_PLACEHOLDER:
-            self._write_paragraph_placeholder(sub_target.paragraph_obj, lines, sub_target.placeholder_text)
+            self._write_paragraph_placeholder(sub_target.paragraph_obj, lines, sub_target.placeholder_text, is_code=is_code)
 
-    def _write_table_cell_specific(self, cell: _Cell, lines: List[str], metadata: Dict[str, Any]) -> None:
+    def _write_table_cell_specific(
+        self,
+        cell: _Cell,
+        lines: List[str],
+        metadata: Dict[str, Any],
+        is_code: bool = False,
+    ) -> None:
         """Write concise answer cleanly into a specific table cell without any 'Answer:' prefix."""
         p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
-        p.text = ""
+        self._clear_paragraph(p)
         if not lines:
             return
 
-        txt = lines[0]
-        txt = re.sub(r"^(?:Answer|Ans|Solution)\s*[:\-–—]\s*", "", txt, flags=re.IGNORECASE).strip()
-        r = p.add_run(txt)
-        r.font.size = Pt(9.5)
-        r.font.color.rgb = ANSWER_COLOR_RGB
-
-        for line in lines[1:]:
-            if not line.strip():
+        in_explanation = False
+        first = True
+        for line in lines:
+            if not line.strip() and not is_code:
                 continue
-            np = cell.add_paragraph()
-            r2 = np.add_run(line.strip())
-            r2.font.size = Pt(9.5)
-            r2.font.color.rgb = ANSWER_COLOR_RGB
+            if line.strip().lower().startswith("explanation:"):
+                in_explanation = True
 
-    def _write_paragraph_empty(self, p: Paragraph, lines: List[str], question: ParsedQuestion) -> None:
+            is_code_line = is_code and not in_explanation
+            if first:
+                cur_p = p
+                txt = line
+                if not is_code:
+                    txt = re.sub(r"^(?:Answer|Ans|Solution)\s*[:\-–—]\s*", "", txt, flags=re.IGNORECASE).strip()
+                r = cur_p.add_run(txt)
+                self._style_line_run(cur_p, r, txt, is_code, is_code_line)
+                first = False
+            else:
+                cur_p = cell.add_paragraph()
+                r2 = cur_p.add_run(line if is_code else line.strip())
+                self._style_line_run(cur_p, r2, line, is_code, is_code_line)
+
+    def _write_paragraph_empty(
+        self,
+        p: Paragraph,
+        lines: List[str],
+        question: ParsedQuestion,
+        is_code: bool = False,
+    ) -> None:
         """Write answer cleanly into designated empty paragraph(s) without spurious headers."""
-        p.text = ""
+        self._clear_paragraph(p)
         if not lines:
             return
 
-        is_code = question.question_type == QuestionType.CODE
         first = True
         current_p = p
         parent_doc = p._parent
+        in_explanation = False
 
         for line in lines:
-            if not line.strip():
+            if not line.strip() and not is_code:
                 continue
+            if line.strip().lower().startswith("explanation:"):
+                in_explanation = True
+
+            is_code_line = is_code and not in_explanation
+
             if first:
-                run = current_p.add_run(line)
+                run = current_p.add_run(line if is_code else line.strip())
+                self._style_line_run(current_p, run, line, is_code, is_code_line)
                 first = False
             else:
                 # Check if immediate next sibling is an existing empty paragraph we can reuse
@@ -666,34 +748,30 @@ class TargetWriter:
 
                 if is_reusable_empty_p:
                     cont_p = Paragraph(next_elm, parent_doc)
-                    cont_p.text = ""
-                    run = cont_p.add_run(line)
+                    self._clear_paragraph(cont_p)
+                    run = cont_p.add_run(line if is_code else line.strip())
+                    self._style_line_run(cont_p, run, line, is_code, is_code_line)
                     current_p = cont_p
                 else:
                     new_p_elm = current_p._p.getparent()._new_p()
                     current_p._p.addnext(new_p_elm)
                     cont_p = Paragraph(new_p_elm, parent_doc)
-                    run = cont_p.add_run(line)
+                    run = cont_p.add_run(line if is_code else line.strip())
+                    self._style_line_run(cont_p, run, line, is_code, is_code_line)
                     current_p = cont_p
-
-            if is_code:
-                run.font.name = "Consolas"
-                run.font.size = Pt(9.5)
-            else:
-                run.font.size = Pt(10.5)
-            run.font.color.rgb = ANSWER_COLOR_RGB
 
     def _write_paragraph_placeholder(
         self,
         p: Paragraph,
         lines: List[str],
         placeholder_text: Optional[str],
+        is_code: bool = False,
     ) -> None:
         """Write into an existing placeholder paragraph (e.g. 'Answer: ')."""
         p_text = (placeholder_text or p.text).strip()
 
         # Clear existing text / runs
-        p.text = ""
+        self._clear_paragraph(p)
 
         # Check if the placeholder contained a label like "Answer:"
         has_label = bool(re.match(r"^(?:Answer|Ans|Solution|Response|Output)\s*[:\-–—]?", p_text, re.IGNORECASE))
@@ -705,57 +783,77 @@ class TargetWriter:
             lbl_run.font.color.rgb = ANSWER_COLOR_RGB
             lbl_run.font.size = Pt(10.5)
 
+        in_explanation = False
         if lines:
-            txt_run = p.add_run(lines[0])
-            txt_run.font.color.rgb = ANSWER_COLOR_RGB
-            txt_run.font.size = Pt(10.5)
+            line0 = lines[0]
+            if line0.strip().lower().startswith("explanation:"):
+                in_explanation = True
+            is_code_line0 = is_code and not in_explanation
+            txt_run = p.add_run(line0 if is_code else line0.strip())
+            self._style_line_run(p, txt_run, line0, is_code, is_code_line0)
 
-        # For multi-line responses (long answer), insert continuation paragraphs immediately following
+        # For multi-line responses, insert continuation paragraphs immediately following
         current_anchor = p
         parent_doc = p._parent
         for line in lines[1:]:
-            if not line.strip():
+            if not line.strip() and not is_code:
                 continue
+            if line.strip().lower().startswith("explanation:"):
+                in_explanation = True
+            is_code_line = is_code and not in_explanation
+
             new_p_elm = current_anchor._p.getparent()._new_p()
             current_anchor._p.addnext(new_p_elm)
             cont_p = Paragraph(new_p_elm, parent_doc)
-            r = cont_p.add_run(line)
-            if re.match(r"^\d+[\.\)]\s+[A-Za-z]", line.strip()):
+            r = cont_p.add_run(line if is_code else line.strip())
+            if not is_code and re.match(r"^\d+[\.\)]\s+[A-Za-z]", line.strip()):
                 r.bold = True
-            r.font.color.rgb = ANSWER_COLOR_RGB
-            r.font.size = Pt(10.5)
+            self._style_line_run(cont_p, r, line, is_code, is_code_line)
             current_anchor = cont_p
 
-    def _write_paragraph_box(self, p: Paragraph, lines: List[str]) -> None:
+    def _write_paragraph_box(self, p: Paragraph, lines: List[str], is_code: bool = False) -> None:
         """Write into an empty bordered paragraph box."""
-        p.text = ""
+        self._clear_paragraph(p)
         lbl_run = p.add_run("Answer: ")
         lbl_run.bold = True
         lbl_run.font.color.rgb = ANSWER_COLOR_RGB
         lbl_run.font.size = Pt(10.5)
 
+        in_explanation = False
         if lines:
-            txt_run = p.add_run(lines[0])
-            txt_run.font.color.rgb = ANSWER_COLOR_RGB
-            txt_run.font.size = Pt(10.5)
+            line0 = lines[0]
+            if line0.strip().lower().startswith("explanation:"):
+                in_explanation = True
+            is_code_line0 = is_code and not in_explanation
+            txt_run = p.add_run(line0 if is_code else line0.strip())
+            self._style_line_run(p, txt_run, line0, is_code, is_code_line0)
 
         current_anchor = p
         parent_doc = p._parent
         for line in lines[1:]:
-            if not line.strip():
+            if not line.strip() and not is_code:
                 continue
+            if line.strip().lower().startswith("explanation:"):
+                in_explanation = True
+            is_code_line = is_code and not in_explanation
+
             new_p_elm = current_anchor._p.getparent()._new_p()
             current_anchor._p.addnext(new_p_elm)
             cont_p = Paragraph(new_p_elm, parent_doc)
-            r = cont_p.add_run(line)
-            r.font.color.rgb = ANSWER_COLOR_RGB
-            r.font.size = Pt(10.5)
+            r = cont_p.add_run(line if is_code else line.strip())
+            self._style_line_run(cont_p, r, line, is_code, is_code_line)
             current_anchor = cont_p
 
-    def _write_table_cell(self, cell: _Cell, lines: List[str], placeholder_text: Optional[str]) -> None:
+    def _write_table_cell(
+        self,
+        cell: _Cell,
+        lines: List[str],
+        placeholder_text: Optional[str],
+        is_code: bool = False,
+    ) -> None:
         """Write into a dedicated table cell."""
         p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
-        p.text = ""
+        self._clear_paragraph(p)
 
         # Check if cell had an "Answer:" label
         if placeholder_text and re.match(r"^(?:Answer|Ans|Solution)\s*[:\-–—]?", placeholder_text, re.IGNORECASE):
@@ -764,23 +862,30 @@ class TargetWriter:
             lbl_run.font.color.rgb = ANSWER_COLOR_RGB
             lbl_run.font.size = Pt(10)
 
+        in_explanation = False
         if lines:
-            txt_run = p.add_run(lines[0])
-            txt_run.font.color.rgb = ANSWER_COLOR_RGB
-            txt_run.font.size = Pt(10)
+            line0 = lines[0]
+            if line0.strip().lower().startswith("explanation:"):
+                in_explanation = True
+            is_code_line0 = is_code and not in_explanation
+            txt_run = p.add_run(line0 if is_code else line0.strip())
+            self._style_line_run(p, txt_run, line0, is_code, is_code_line0)
 
         # Multi-paragraph inside the same cell
         for line in lines[1:]:
-            if not line.strip():
+            if not line.strip() and not is_code:
                 continue
-            new_p = cell.add_paragraph()
-            r = new_p.add_run(line)
-            if re.match(r"^\d+[\.\)]\s+[A-Za-z]", line.strip()):
-                r.bold = True
-            r.font.color.rgb = ANSWER_COLOR_RGB
-            r.font.size = Pt(10)
+            if line.strip().lower().startswith("explanation:"):
+                in_explanation = True
+            is_code_line = is_code and not in_explanation
 
-    def _write_table_cell_append(self, cell: _Cell, lines: List[str]) -> None:
+            new_p = cell.add_paragraph()
+            r = new_p.add_run(line if is_code else line.strip())
+            if not is_code and re.match(r"^\d+[\.\)]\s+[A-Za-z]", line.strip()):
+                r.bold = True
+            self._style_line_run(new_p, r, line, is_code, is_code_line)
+
+    def _write_table_cell_append(self, cell: _Cell, lines: List[str], is_code: bool = False) -> None:
         """Append answer inside question cell when no separate cell exists."""
         ans_p = cell.add_paragraph()
         lbl_run = ans_p.add_run("Answer: ")
@@ -788,18 +893,25 @@ class TargetWriter:
         lbl_run.font.color.rgb = ANSWER_COLOR_RGB
         lbl_run.font.size = Pt(10)
 
+        in_explanation = False
         if lines:
-            txt_run = ans_p.add_run(lines[0])
-            txt_run.font.color.rgb = ANSWER_COLOR_RGB
-            txt_run.font.size = Pt(10)
+            line0 = lines[0]
+            if line0.strip().lower().startswith("explanation:"):
+                in_explanation = True
+            is_code_line0 = is_code and not in_explanation
+            txt_run = ans_p.add_run(line0 if is_code else line0.strip())
+            self._style_line_run(ans_p, txt_run, line0, is_code, is_code_line0)
 
         for line in lines[1:]:
-            if not line.strip():
+            if not line.strip() and not is_code:
                 continue
+            if line.strip().lower().startswith("explanation:"):
+                in_explanation = True
+            is_code_line = is_code and not in_explanation
+
             new_p = cell.add_paragraph()
-            r = new_p.add_run(line)
-            r.font.color.rgb = ANSWER_COLOR_RGB
-            r.font.size = Pt(10)
+            r = new_p.add_run(line if is_code else line.strip())
+            self._style_line_run(new_p, r, line, is_code, is_code_line)
 
     def _write_text_box(self, doc: docx.Document, txbx_element: Any, lines: List[str]) -> None:
         """Write answer into w:txbxContent element in DrawingML or VML."""

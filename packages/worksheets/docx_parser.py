@@ -21,6 +21,7 @@ from packages.worksheets.models import (
     ParsedWorksheet,
     QuestionOption,
     QuestionType,
+    ResponseMode,
     WorksheetSection,
 )
 
@@ -599,6 +600,14 @@ class DocxWorksheetParser(BaseWorksheetParser):
             self._finalize_pending_question(current_question, questions, pending_empty_paragraphs)
             current_question = None
 
+        ws_course_code = metadata.get("course_code")
+        if ws_course_code:
+            for q in questions:
+                if not q.language and q.response_mode in (ResponseMode.CODE, ResponseMode.CODE_AND_EXPLANATION):
+                    q.language = QuestionClassifier.detect_code_intent(
+                        q.question_text, context={"course_code": ws_course_code}
+                    )[1]
+
         title = metadata.get("header_text") or (sections[0].name if sections else path.stem)
 
         return ParsedWorksheet(
@@ -674,12 +683,18 @@ class DocxWorksheetParser(BaseWorksheetParser):
         self._finalize_question(current_question)
         questions.append(current_question)
 
-    def _finalize_question(self, question: ParsedQuestion) -> None:
+    def _finalize_question(
+        self,
+        question: ParsedQuestion,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Classify and polish question before adding to question list."""
         if question.targets and any(t.target_type == "TABLE_CELL" for t in question.targets):
             question.question_type = QuestionType.TABLE_CELL
+            question.response_mode = ResponseMode.TABLE_VALUE
+            question.available_space = "compact"
         else:
-            question.question_type = QuestionClassifier.classify(question)
+            question.question_type = QuestionClassifier.classify(question, context=context)
 
     def _parse_table_questions(
         self,
