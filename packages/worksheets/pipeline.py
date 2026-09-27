@@ -5,9 +5,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from packages.worksheets.answer_engine import AnswerEngineFactory, BaseAnswerEngine
-from packages.worksheets.answer_models import PipelineResult, WorksheetAnswers
+from packages.worksheets.answer_models import AnswerStatus, PipelineResult, WorksheetAnswers
+from packages.worksheets.code_validator import CodeAnswerValidator
+from packages.worksheets.exceptions import AnswerGenerationError
 from packages.worksheets.filler import DocxWorksheetFiller
-from packages.worksheets.models import ParsedWorksheet
+from packages.worksheets.models import ParsedWorksheet, QuestionType, ResponseMode
 from packages.worksheets.parser import WorksheetParser
 
 logger = logging.getLogger(__name__)
@@ -69,7 +71,28 @@ class WorksheetPipeline:
             answers.average_confidence,
         )
 
-        # 3. Fill Document Copy
+        # 3. Post-generation Code Answer Validation (CRITICAL - DO NOT ALLOW EMPTY/INVALID CODE TO FILLER)
+        for q in parsed_worksheet.questions:
+            is_code_q = (
+                getattr(q, "response_mode", None) in (ResponseMode.CODE, ResponseMode.CODE_AND_EXPLANATION)
+                or q.question_type == QuestionType.CODE
+            )
+            if is_code_q:
+                q_ans = answers.get_answer(q.question_id)
+                if not q_ans or not q_ans.answer_text or q_ans.status == AnswerStatus.ERROR or q_ans.answer_text.startswith("[Empty"):
+                    raise AnswerGenerationError(
+                        f"Worksheet filler blocked: Question '{q.question_id}' ('{q.question_text[:60]}') "
+                        "has no valid code answer."
+                    )
+                val = CodeAnswerValidator.validate(q_ans.answer_text, q, q_ans.language or q.language)
+                if not val.is_valid:
+                    raise AnswerGenerationError(
+                        f"Worksheet filler blocked: Question '{q.question_id}' failed post-generation code validation: {val.reason}"
+                    )
+                # Ensure cleaned code is stored
+                q_ans.answer_text = val.cleaned_code
+
+        # 4. Fill Document Copy
         if context and "student_info" in context:
             self.filler.header_filler = StudentHeaderFiller(context["student_info"])
 

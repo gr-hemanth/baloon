@@ -29,6 +29,7 @@ from packages.worksheets.answer_models import (
 )
 from packages.worksheets.exceptions import (
     AnswerEngineError,
+    AnswerGenerationError,
     LLMAuthenticationError,
     LLMNetworkError,
     LLMRateLimitError,
@@ -36,6 +37,7 @@ from packages.worksheets.exceptions import (
     LLMTimeoutError,
     MissingAnswerError,
 )
+from packages.worksheets.code_validator import CodeAnswerValidator
 from packages.worksheets.models import (
     ParsedQuestion,
     ParsedWorksheet,
@@ -984,6 +986,111 @@ class RuleBasedAnswerEngine(BaseAnswerEngine):
             )
             lang = "java"
             resp_mode = ResponseMode.CODE_AND_EXPLANATION
+        elif "thread" in text and "hello" in text:
+            code = (
+                "class HelloThread extends Thread {\n"
+                "    public void run() {\n"
+                "        System.out.println(\"Hello\");\n"
+                "    }\n"
+                "    public static void main(String[] args) {\n"
+                "        HelloThread t = new HelloThread();\n"
+                "        t.start();\n"
+                "    }\n"
+                "}"
+            )
+            lang = "java"
+            resp_mode = ResponseMode.CODE
+        elif ("two thread" in text or ("even" in text and "odd" in text)) and "thread" in text:
+            code = (
+                "class EvenThread extends Thread {\n"
+                "    public void run() {\n"
+                "        for (int i = 2; i <= 10; i += 2) {\n"
+                "            System.out.println(\"Even: \" + i);\n"
+                "        }\n"
+                "    }\n"
+                "}\n\n"
+                "class OddThread extends Thread {\n"
+                "    public void run() {\n"
+                "        for (int i = 1; i <= 9; i += 2) {\n"
+                "            System.out.println(\"Odd: \" + i);\n"
+                "        }\n"
+                "    }\n"
+                "}\n\n"
+                "public class EvenOddDemo {\n"
+                "    public static void main(String[] args) {\n"
+                "        new EvenThread().start();\n"
+                "        new OddThread().start();\n"
+                "    }\n"
+                "}"
+            )
+            lang = "java"
+            resp_mode = ResponseMode.CODE
+        elif "sleep" in text and "join" in text:
+            code = (
+                "class WorkerThread extends Thread {\n"
+                "    public void run() {\n"
+                "        try {\n"
+                "            System.out.println(\"Child thread running, sleeping for 500ms...\");\n"
+                "            Thread.sleep(500);\n"
+                "            System.out.println(\"Child thread finished execution.\");\n"
+                "        } catch (InterruptedException e) {\n"
+                "            System.out.println(\"Thread interrupted: \" + e.getMessage());\n"
+                "        }\n"
+                "    }\n"
+                "}\n\n"
+                "public class SleepJoinDemo {\n"
+                "    public static void main(String[] args) {\n"
+                "        WorkerThread t = new WorkerThread();\n"
+                "        t.start();\n"
+                "        try {\n"
+                "            System.out.println(\"Main thread waiting for child thread via join()...\");\n"
+                "            t.join();\n"
+                "            System.out.println(\"Child thread has completed. Main thread resumes.\");\n"
+                "        } catch (InterruptedException e) {\n"
+                "            System.out.println(\"Main interrupted: \" + e.getMessage());\n"
+                "        }\n"
+                "    }\n"
+                "}"
+            )
+            lang = "java"
+            resp_mode = ResponseMode.CODE
+        elif "interface" in text and ("implement" in text or "class" in text):
+            code = (
+                "interface Printable {\n"
+                "    void print();\n"
+                "}\n\n"
+                "class Document implements Printable {\n"
+                "    @Override\n"
+                "    public void print() {\n"
+                "        System.out.println(\"Document printed successfully.\");\n"
+                "    }\n"
+                "}"
+            )
+            lang = "java"
+            resp_mode = ResponseMode.CODE
+        elif ("inheritance" in text or "subclass" in text or "superclass" in text or "extends" in text):
+            code = (
+                "class Animal {\n"
+                "    protected String name;\n\n"
+                "    public Animal(String name) {\n"
+                "        this.name = name;\n"
+                "    }\n\n"
+                "    public void sound() {\n"
+                "        System.out.println(name + \" makes a sound\");\n"
+                "    }\n"
+                "}\n\n"
+                "class Dog extends Animal {\n"
+                "    public Dog(String name) {\n"
+                "        super(name);\n"
+                "    }\n\n"
+                "    @Override\n"
+                "    public void sound() {\n"
+                "        System.out.println(name + \" barks\");\n"
+                "    }\n"
+                "}"
+            )
+            lang = "java"
+            resp_mode = ResponseMode.CODE
         elif "python" in text or lang == "python":
             code = (
                 "def solve(nums: list[int]) -> int:\n"
@@ -1323,41 +1430,6 @@ class LLMAnswerEngine(BaseAnswerEngine):
                 self.fallback_engine = RuleBasedAnswerEngine()
             else:
                 self.fallback_engine = None
-        elif not is_test_env:
-            # Production: automatically wire configured fallback provider if different from primary
-            cfg_fallback = getattr(settings, "AI_FALLBACK_PROVIDER", None)
-            if cfg_fallback and cfg_fallback.lower() != self.provider:
-                fb_prov = cfg_fallback.lower()
-                if fb_prov in ("freellm", "free_llm"):
-                    fb_key = getattr(settings, "FREELLM_API_KEY", None) or os.getenv("FREELLM_API_KEY")
-                    self.fallback_engine = LLMAnswerEngine(
-                        provider="freellm",
-                        api_key=fb_key,
-                        allow_fallback_when_unconfigured=allow_fallback_when_unconfigured,
-                        fallback_engine=None,
-                        max_retries=getattr(settings, "FREELLM_MAX_RETRIES", 2),
-                        timeout=getattr(settings, "FREELLM_TIMEOUT_SECONDS", 60.0),
-                        temperature=getattr(settings, "FREELLM_TEMPERATURE", 0.2),
-                        chunk_size=getattr(settings, "FREELLM_BATCH_SIZE", 2),
-                    )
-                elif fb_prov == "nvidia":
-                    fb_key = getattr(settings, "NVIDIA_API_KEY", None) or os.getenv("NVIDIA_API_KEY")
-                    self.fallback_engine = LLMAnswerEngine(
-                        provider="nvidia",
-                        api_key=fb_key,
-                        allow_fallback_when_unconfigured=allow_fallback_when_unconfigured,
-                        fallback_engine=None,
-                        max_retries=getattr(settings, "NVIDIA_MAX_RETRIES", 3),
-                        timeout=getattr(settings, "NVIDIA_TIMEOUT_SECONDS", 60.0),
-                        temperature=getattr(settings, "NVIDIA_TEMPERATURE", 0.2),
-                        chunk_size=getattr(settings, "NVIDIA_BATCH_SIZE", 4),
-                    )
-                elif fb_prov in ("rule", "mock"):
-                    self.fallback_engine = RuleBasedAnswerEngine()
-                else:
-                    self.fallback_engine = None
-            else:
-                self.fallback_engine = None
         else:
             self.fallback_engine = None
 
@@ -1470,18 +1542,129 @@ class LLMAnswerEngine(BaseAnswerEngine):
                     total_batches,
                 )
 
-            # 2. Check for missing or errored questions in this batch
+            # 2. CODE Question Regeneration Policy (Attempt 1: Primary with strong code prompt, Attempt 2: Fallback provider)
+            code_questions_in_batch = [
+                q for q in batch_questions
+                if (getattr(q, "response_mode", None) in (ResponseMode.CODE, ResponseMode.CODE_AND_EXPLANATION)
+                    or q.question_type == QuestionType.CODE)
+            ]
+            for q in code_questions_in_batch:
+                curr_ans = resolved_answers.get(q.question_id)
+                needs_regen = (
+                    curr_ans is None
+                    or curr_ans.status == AnswerStatus.ERROR
+                    or not curr_ans.answer_text
+                    or curr_ans.answer_text.startswith("[Empty")
+                )
+                if not needs_regen:
+                    val = CodeAnswerValidator.validate(curr_ans.answer_text, q, curr_ans.language or q.language)
+                    if not val.is_valid:
+                        needs_regen = True
+                        curr_ans.status = AnswerStatus.ERROR
+                        curr_ans.error_message = f"Code validation failed: {val.reason}"
+
+                if needs_regen:
+                    prev_err = curr_ans.error_message if curr_ans else str(primary_error or "Empty answer")
+                    logger.info(
+                        "[Code Regeneration Policy] Initiating regeneration for %s ('%s'). Reason: %s",
+                        q.question_id,
+                        q.question_text[:60],
+                        prev_err,
+                    )
+                    attempt_1_success = False
+                    attempt_1_err = ""
+
+                    # Attempt 1: Regenerate with primary provider using stronger code-only instruction
+                    try:
+                        logger.info("[Code Regeneration] Attempt 1: Primary provider '%s' with strict code prompt", self.provider)
+                        regen_ans = await self._regenerate_code_question(
+                            q, context=context, previous_error=prev_err
+                        )
+                        if regen_ans.status != AnswerStatus.ERROR:
+                            val1 = CodeAnswerValidator.validate(regen_ans.answer_text, q, regen_ans.language or q.language)
+                            if val1.is_valid:
+                                regen_ans.answer_text = val1.cleaned_code
+                                regen_ans.status = AnswerStatus.SUCCESS
+                                if regen_ans.metadata is None:
+                                    regen_ans.metadata = {}
+                                regen_ans.metadata["provider"] = self.provider
+                                resolved_answers[q.question_id] = regen_ans
+                                attempt_1_success = True
+                                logger.info("[Code Regeneration] Attempt 1 succeeded with '%s'", self.provider)
+                            else:
+                                attempt_1_err = val1.reason or "Validation failed"
+                        else:
+                            attempt_1_err = regen_ans.error_message or "Primary regeneration returned error status"
+                    except Exception as exc:
+                        attempt_1_err = redact_api_keys(str(exc))
+                        logger.warning("[Code Regeneration] Attempt 1 failed on '%s': %s", self.provider, attempt_1_err)
+
+                    # Attempt 2: Regenerate using fallback provider if Attempt 1 failed
+                    if not attempt_1_success:
+                        attempt_2_success = False
+                        attempt_2_err = ""
+                        fb_engine = self.fallback_engine
+                        if fb_engine is not None and fb_engine is not self:
+                            fb_name = getattr(fb_engine, "provider", "fallback")
+                            logger.info(
+                                "[Code Regeneration] Attempt 2: Fallback provider '%s' (Attempt 1 reason: %s)",
+                                fb_name,
+                                attempt_1_err,
+                            )
+                            try:
+                                if hasattr(fb_engine, "_regenerate_code_question"):
+                                    fb_ans = await fb_engine._regenerate_code_question(
+                                        q,
+                                        context=context,
+                                        previous_error=f"Attempt 1 ({self.provider}) failed: {attempt_1_err}",
+                                    )
+                                else:
+                                    single_ws = worksheet.model_copy(update={"questions": [q]})
+                                    fb_res = await fb_engine.generate_answers(single_ws, context)
+                                    fb_ans = fb_res.answers[0] if fb_res.answers else None
+
+                                if fb_ans and fb_ans.status != AnswerStatus.ERROR:
+                                    val2 = CodeAnswerValidator.validate(fb_ans.answer_text, q, fb_ans.language or q.language)
+                                    if val2.is_valid:
+                                        fb_ans.answer_text = val2.cleaned_code
+                                        fb_ans.status = AnswerStatus.SUCCESS
+                                        if fb_ans.metadata is None:
+                                            fb_ans.metadata = {}
+                                        fb_ans.metadata["provider"] = fb_name
+                                        resolved_answers[q.question_id] = fb_ans
+                                        attempt_2_success = True
+                                        logger.info("[Code Regeneration] Attempt 2 succeeded with '%s'", fb_name)
+                                    else:
+                                        attempt_2_err = val2.reason or "Fallback code validation failed"
+                                else:
+                                    attempt_2_err = getattr(fb_ans, "error_message", None) or "Fallback returned error"
+                            except Exception as fb_exc:
+                                attempt_2_err = redact_api_keys(str(fb_exc))
+                                logger.warning("[Code Regeneration] Attempt 2 failed on '%s': %s", fb_name, attempt_2_err)
+                        else:
+                            attempt_2_err = "No fallback provider configured"
+
+                        if not attempt_2_success:
+                            fb_label = getattr(self.fallback_engine, "provider", "fallback") if self.fallback_engine else "none"
+                            raise AnswerGenerationError(
+                                f"Could not generate a valid code answer for question '{q.question_id}' "
+                                f"('{q.question_text[:80]}'). "
+                                f"Primary provider ('{self.provider}') failed validation: {attempt_1_err}. "
+                                f"Fallback provider ('{fb_label}') failed validation: {attempt_2_err}."
+                            )
+
+            # 3. Check for remaining non-code missing or errored questions in this batch
             missing_q = [
                 q for q in batch_questions
                 if q.question_id not in resolved_answers or resolved_answers[q.question_id].status == AnswerStatus.ERROR
             ]
 
-            # 3. Fail over missing portion to fallback provider without destroying already succeeded answers
+            # 4. Fail over missing non-code portion to fallback provider without destroying already succeeded answers
             if missing_q:
                 if self.fallback_engine is not None and self.fallback_engine is not self:
                     fallback_name = getattr(self.fallback_engine, "provider", "fallback")
                     logger.warning(
-                        "[AI Failover] Failing over batch %d/%d (%d questions) from %s to %s. Reason: %s",
+                        "[AI Failover] Failing over batch %d/%d (%d non-code questions) from %s to %s. Reason: %s",
                         batch_idx,
                         total_batches,
                         len(missing_q),
@@ -1533,7 +1716,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
                     else:
                         raise primary_error
 
-        # 4. Strictly assemble and validate final answer set in exact original question order
+        # 5. Strictly assemble and validate final answer set in exact original question order
         final_answers: List[GeneratedAnswer] = []
         for q in worksheet.questions:
             ans = resolved_answers.get(q.question_id)
@@ -1545,6 +1728,23 @@ class LLMAnswerEngine(BaseAnswerEngine):
                     ans.metadata.setdefault("provider", "rule")
                 else:
                     raise MissingAnswerError(f"Question '{q.question_id}' was not answered by any provider.")
+
+            # Post-generation code safety check: NEVER allow empty or invalid code answer to pass
+            is_code_q = (
+                getattr(q, "response_mode", None) in (ResponseMode.CODE, ResponseMode.CODE_AND_EXPLANATION)
+                or q.question_type == QuestionType.CODE
+            )
+            if is_code_q:
+                if ans.status == AnswerStatus.ERROR or not ans.answer_text or ans.answer_text.startswith("[Empty"):
+                    raise AnswerGenerationError(
+                        f"Could not generate a valid code answer for question '{q.question_id}' ('{q.question_text[:60]}')."
+                    )
+                val = CodeAnswerValidator.validate(ans.answer_text, q, ans.language or q.language)
+                if not val.is_valid:
+                    raise AnswerGenerationError(
+                        f"Final validation failed for code question '{q.question_id}': {val.reason}"
+                    )
+                ans.answer_text = val.cleaned_code
             final_answers.append(ans)
 
         # Verify no duplicate answers exist
@@ -1578,6 +1778,44 @@ class LLMAnswerEngine(BaseAnswerEngine):
                 "chunk_size": chunk_size,
             },
         )
+
+    async def _regenerate_code_question(
+        self,
+        question: ParsedQuestion,
+        context: Optional[Dict[str, Any]] = None,
+        previous_error: str = "",
+    ) -> GeneratedAnswer:
+        """Regenerate a programming question with a strict code-only prompt."""
+        single_ws = ParsedWorksheet(
+            filename="code_regen.docx",
+            file_format="docx",
+            questions=[question],
+            course_code=(context or {}).get("course_code") or "",
+        )
+        if self.provider in ("freellm", "openai", "nvidia"):
+            answers = await self._generate_openai_compatible_answers(
+                single_ws,
+                context=context,
+                is_code_regeneration=True,
+                previous_error=previous_error,
+            )
+        elif self.provider in ("gemini", "llm"):
+            answers = await self._generate_gemini_answers(
+                single_ws,
+                context=context,
+                is_code_regeneration=True,
+                previous_error=previous_error,
+            )
+        else:
+            answers = await self.offline_fallback_engine.generate_answers(single_ws, context)
+
+        if answers.answers:
+            ans = answers.answers[0]
+            if ans.metadata is None:
+                ans.metadata = {}
+            ans.metadata["provider"] = self.provider
+            return ans
+        raise AnswerEngineError(f"{self.provider.upper()} returned no answers during code regeneration.")
 
     async def _generate_batch_with_retry(
         self,
@@ -1754,9 +1992,11 @@ class LLMAnswerEngine(BaseAnswerEngine):
             resp_mode_val = q.response_mode.value if hasattr(q.response_mode, "value") else str(getattr(q, "response_mode", "TEXT"))
             lang_val = q.language
             if not lang_val and resp_mode_val in ("CODE", "CODE_AND_EXPLANATION"):
-                course_code = str(worksheet.course_code or "").upper()
-                if "21CSC203P" in course_code or "CSC203" in course_code:
-                    lang_val = "java"
+                from packages.worksheets.classifier import CodeIntentDetector
+                lang_val = CodeIntentDetector.detect_language(
+                    q.question_text,
+                    {"course_code": worksheet.course_code}
+                ) or "java"
 
             q_dict = {
                 "question_id": q.question_id,
@@ -1774,15 +2014,17 @@ class LLMAnswerEngine(BaseAnswerEngine):
             if q.targets:
                 targets_list = []
                 for t in q.targets:
-                    targets_list.append({
-                        "target_id": t.target_id,
-                        "target_type": t.target_type,
-                        "column_header": t.column_header,
-                        "row_label": t.row_label,
-                        "semantic": t.semantic,
-                        "expected_length": t.expected_length,
-                    })
-                q_dict["targets"] = targets_list
+                    if str(getattr(t, "target_type", "")).upper() in ("TABLE_CELL", "TABLE_CELL_SPECIFIC"):
+                        targets_list.append({
+                            "target_id": t.target_id,
+                            "target_type": t.target_type,
+                            "column_header": t.column_header,
+                            "row_label": t.row_label,
+                            "semantic": t.semantic,
+                            "expected_length": t.expected_length,
+                        })
+                if targets_list:
+                    q_dict["targets"] = targets_list
             questions_payload.append(q_dict)
         return questions_payload
 
@@ -1828,10 +2070,59 @@ class LLMAnswerEngine(BaseAnswerEngine):
                     or ans_data.get("content")
                     or ""
                 ).strip()
+
+                target_answers = ans_data.get("target_answers")
+                if not isinstance(target_answers, dict):
+                    target_answers = ans_data.get("targets") if isinstance(ans_data.get("targets"), dict) else {}
+
+                # Fallback: if ans_text is empty but target_answers is present
+                if not ans_text and target_answers:
+                    ans_text = "\n".join(str(v).strip() for v in target_answers.values() if str(v).strip())
+
+                ans_resp_mode_str = ans_data.get("response_mode")
+                if ans_resp_mode_str:
+                    try:
+                        ans_resp_mode = ResponseMode(str(ans_resp_mode_str).upper())
+                    except ValueError:
+                        ans_resp_mode = getattr(question, "response_mode", ResponseMode.TEXT)
+                else:
+                    ans_resp_mode = getattr(question, "response_mode", ResponseMode.TEXT)
+
+                # Question's identified response mode is authoritative if CODE or CODE_AND_EXPLANATION
+                q_mode = getattr(question, "response_mode", None)
+                if q_mode in (ResponseMode.CODE, ResponseMode.CODE_AND_EXPLANATION):
+                    ans_resp_mode = q_mode
+
+                ans_language = ans_data.get("language") or getattr(question, "language", None)
+                if not ans_language and ans_resp_mode in (ResponseMode.CODE, ResponseMode.CODE_AND_EXPLANATION):
+                    from packages.worksheets.classifier import CodeIntentDetector
+                    ans_language = CodeIntentDetector.detect_language(
+                        question.question_text,
+                        {"course_code": worksheet.course_code}
+                    ) or "java"
+
+                val_error = None
                 if not ans_text:
                     ans_text = "[Empty answer returned by AI]"
-                    status = AnswerStatus.LOW_CONFIDENCE
-                    conf = 0.2
+                    status = AnswerStatus.ERROR
+                    val_error = "Empty answer returned by AI provider"
+                    conf = 0.0
+                elif ans_resp_mode in (ResponseMode.CODE, ResponseMode.CODE_AND_EXPLANATION):
+                    val = CodeAnswerValidator.validate(ans_text, question, ans_language)
+                    if not val.is_valid:
+                        status = AnswerStatus.ERROR
+                        val_error = f"Code validation failed: {val.reason}"
+                        conf = 0.0
+                        logger.warning(
+                            "[Code Validation Rejected] Question %s failed validation: %s (Answer: %s)",
+                            question.question_id,
+                            val.reason,
+                            repr(ans_text[:100]),
+                        )
+                    else:
+                        ans_text = val.cleaned_code
+                        status = AnswerStatus.SUCCESS
+                        conf = float(ans_data.get("confidence", 0.95))
                 else:
                     try:
                         conf = float(ans_data.get("confidence", 0.95))
@@ -1848,21 +2139,6 @@ class LLMAnswerEngine(BaseAnswerEngine):
                     if opt_match:
                         sel_opt = opt_match.group(1)
 
-                target_answers = ans_data.get("target_answers")
-                if not isinstance(target_answers, dict):
-                    target_answers = ans_data.get("targets") if isinstance(ans_data.get("targets"), dict) else {}
-
-                ans_resp_mode_str = ans_data.get("response_mode")
-                if ans_resp_mode_str:
-                    try:
-                        ans_resp_mode = ResponseMode(str(ans_resp_mode_str).upper())
-                    except ValueError:
-                        ans_resp_mode = getattr(question, "response_mode", ResponseMode.TEXT)
-                else:
-                    ans_resp_mode = getattr(question, "response_mode", ResponseMode.TEXT)
-
-                ans_language = ans_data.get("language") or getattr(question, "language", None)
-
                 generated_answers.append(
                     GeneratedAnswer(
                         question_id=question.question_id,
@@ -1876,6 +2152,7 @@ class LLMAnswerEngine(BaseAnswerEngine):
                         confidence=conf,
                         explanation=ans_data.get("explanation"),
                         status=status,
+                        error_message=val_error,
                         metadata={"provider": self.provider, "model": used_model},
                     )
                 )
@@ -1917,6 +2194,8 @@ class LLMAnswerEngine(BaseAnswerEngine):
         worksheet: ParsedWorksheet,
         context: Optional[Dict[str, Any]] = None,
         override_model: Optional[str] = None,
+        is_code_regeneration: bool = False,
+        previous_error: str = "",
     ) -> WorksheetAnswers:
         """Execute chat completion request against OpenAI-compatible API (e.g. FreeLLM)."""
         questions_payload = self._build_questions_payload(worksheet)
@@ -1928,97 +2207,133 @@ class LLMAnswerEngine(BaseAnswerEngine):
             "slo": worksheet.slo or (context or {}).get("slo", ""),
         }
 
-        system_prompt = (
-            "You are a capable, knowledgeable college student writing exam and worksheet solutions.\n"
-            "Your writing must read like authentic student coursework: technically accurate, clear, and direct.\n\n"
-            "STRICT RULES (CRITICAL):\n"
-            "1. NO MARKDOWN ARTIFACTS OR FORMATTING IN 'answer_text':\n"
-            "   - Do NOT use markdown headers (no '#', '##', '###', '####').\n"
-            "   - Do NOT use bold markdown (no '**' or '__').\n"
-            "   - Do NOT use italics (no '*' or '_').\n"
-            "   - Do NOT use bullet points with asterisks or dashes (no '*' or '- ').\n"
-            "   - Write only in standard, natural English sentences and paragraphs.\n"
-            "2. NO AI PHRASING, INTROS, OR FILLER:\n"
-            "   - Never say 'Certainly!', 'Here is the answer:', 'As a college student...', 'In conclusion', or 'Furthermore'.\n"
-            "   - Answer directly and plainly without conversational preambles or robotic summaries.\n"
-            "3. RESPONSE MODE INSTRUCTIONS (CRITICAL - DO NOT CONFUSE CODE WITH THEORY):\n"
-            "   - Every question specifies a 'response_mode'. Follow it strictly above question_type length heuristics:\n"
-            "   - When 'response_mode' == 'CODE':\n"
-            "     * You MUST write actual, syntactically correct, executable code in the requested 'language' (e.g., complete Java class definitions with fields, constructors, methods).\n"
-            "     * NEVER write conceptual descriptions or descriptive theory instead of code! A question asking to 'Design a class hierarchy' or 'Create a class' REQUIRES ACTUAL CODE.\n"
-            "     * Output clean raw code directly. Do NOT wrap code in markdown code fences (no ```).\n"
-            "     * If 'available_space' is 'compact', provide clean, concise code.\n"
-            "   - When 'response_mode' == 'CODE_AND_EXPLANATION':\n"
-            "     * Provide the complete code implementation first, followed by a brief, clear explanation (e.g. 'Explanation:\n...').\n"
-            "     * Do NOT omit the code implementation.\n"
-            "   - When 'response_mode' == 'ALGORITHM':\n"
-            "     * Provide a numbered, step-by-step algorithm.\n"
-            "   - When 'response_mode' == 'PSEUDOCODE':\n"
-            "     * Provide structured pseudocode without markdown code fences.\n"
-            "   - When 'response_mode' == 'OUTPUT_TRACE':\n"
-            "     * Provide the exact execution output or variable trace.\n"
-            "   - When 'response_mode' == 'TABLE_VALUE':\n"
-            "     * Provide concise cell values in target_answers.\n"
-            "   - When 'response_mode' == 'TEXT':\n"
-            "     * Provide plain student theory.\n"
-            "4. TABLE ACTIVITIES (CRITICAL - CELL-BY-CELL):\n"
-            "   - When a question has 'targets', provide a concise answer for EACH target in 'target_answers':\n"
-            "     'target_answers': { '<target_id>': '<concise 3-8 word student value>' }\n"
-            "   - Do NOT write paragraphs inside table cells! Keep answers as concise phrases (3 to 8 words).\n"
-            "   - NEVER write 'Answer: ...' inside cell values.\n"
-            "5. TICK / SELECT QUESTIONS:\n"
-            "   - Set 'selected_option' to the chosen option and 'answer_text' to the choice + 1-line rationale.\n"
-            "6. STRUCTURING LONG DELIVERABLES:\n"
-            "   - Use clean, standard numbering ('1.', '2.') or plain text capitalized labels on their own lines (e.g. 'Problem Statement:', 'Proposed Solution:'). Do NOT bold them.\n"
-            "7. RESPONSE SCHEMA:\n"
-            "   - Respond ONLY with a valid JSON object matching this schema:\n"
-            "{\n"
-            '  "answers": [\n'
-            "    {\n"
-            '      "question_id": "<exact question_id from input>",\n'
-            '      "question_number": "<question_number or null>",\n'
-            '      "response_mode": "<CODE | CODE_AND_EXPLANATION | TEXT | ALGORITHM | PSEUDOCODE | OUTPUT_TRACE | TABLE_VALUE>",\n'
-            '      "language": "<language or null>",\n'
-            '      "answer_text": "<clean, natural student answer or raw code without markdown fences>",\n'
-            '      "target_answers": {\n'
-            '        "<target_id>": "<concise student answer 3-8 words for this specific cell>"\n'
-            '      },\n'
-            '      "selected_option": "<option letter like A, B, C, D if MCQ, or chosen tick option, otherwise null>",\n'
-            '      "confidence": <float 0.0 to 1.0>,\n'
-            '      "explanation": "<brief rationale>"\n'
-            "    }\n"
-            "  ]\n"
-            "}"
-        )
+        if is_code_regeneration:
+            system_prompt = (
+                "You are an expert software developer and computer science instructor.\n"
+                "Your task is to generate ONLY valid, runnable, and syntactically correct code for the given programming question.\n\n"
+                "STRICT RULES (CRITICAL):\n"
+                "1. You MUST generate real, syntactically valid code in the requested language (e.g. Java classes with methods/fields).\n"
+                "2. NEVER output prose descriptions, conceptual theory, or instructional essays.\n"
+                "3. Do NOT wrap code in markdown code fences (no ```).\n"
+                "4. All requested constructs (classes, methods, threads, sleep, join, even/odd logic, etc.) must be implemented directly in the code.\n"
+                "5. If response_mode is 'CODE_AND_EXPLANATION', write complete code first, then 'Explanation:\n' and a concise explanation.\n"
+                "6. Respond ONLY with a valid JSON object matching the answers schema:\n"
+                "{\n"
+                '  "answers": [\n'
+                "    {\n"
+                '      "question_id": "<exact question_id from input>",\n'
+                '      "question_number": "<question_number or null>",\n'
+                '      "response_mode": "<CODE | CODE_AND_EXPLANATION>",\n'
+                '      "language": "<language>",\n'
+                '      "answer_text": "<raw code without markdown fences>",\n'
+                '      "confidence": 0.98,\n'
+                '      "explanation": "<short explanation if CODE_AND_EXPLANATION, else empty>"\n'
+                "    }\n"
+                "  ]\n"
+                "}"
+            )
+            user_prompt = (
+                f"REGENERATION ATTEMPT - PREVIOUS ANSWER REJECTED.\n"
+                f"Previous Failure: {previous_error or 'Code validation failed or prose was returned instead of executable code.'}\n\n"
+                f"Worksheet Context:\n"
+                f"- Course Code: {ws_context['course_code']}\n"
+                f"- Course Title: {ws_context['course_name']}\n\n"
+                f"Questions to implement with REAL, COMPLETE CODE:\n"
+                f"{json.dumps(questions_payload, indent=2)}\n\n"
+                "Provide the complete executable code now."
+            )
+        else:
+            system_prompt = (
+                "You are a capable, knowledgeable college student writing exam and worksheet solutions.\n"
+                "Your writing must read like authentic student coursework: technically accurate, clear, and direct.\n\n"
+                "STRICT RULES (CRITICAL):\n"
+                "1. NO MARKDOWN ARTIFACTS OR FORMATTING IN 'answer_text':\n"
+                "   - Do NOT use markdown headers (no '#', '##', '###', '####').\n"
+                "   - Do NOT use bold markdown (no '**' or '__').\n"
+                "   - Do NOT use italics (no '*' or '_').\n"
+                "   - Do NOT use bullet points with asterisks or dashes (no '*' or '- ').\n"
+                "   - Write only in standard, natural English sentences and paragraphs.\n"
+                "2. NO AI PHRASING, INTROS, OR FILLER:\n"
+                "   - Never say 'Certainly!', 'Here is the answer:', 'As a college student...', 'In conclusion', or 'Furthermore'.\n"
+                "   - Answer directly and plainly without conversational preambles or robotic summaries.\n"
+                "3. RESPONSE MODE INSTRUCTIONS (CRITICAL - DO NOT CONFUSE CODE WITH THEORY):\n"
+                "   - Every question specifies a 'response_mode'. Follow it strictly above question_type length heuristics:\n"
+                "   - When 'response_mode' == 'CODE':\n"
+                "     * You MUST write actual, syntactically correct, executable code in the requested 'language' (e.g., complete Java class definitions with fields, constructors, methods).\n"
+                "     * NEVER write conceptual descriptions or descriptive theory instead of code! A question asking to 'Design a class hierarchy' or 'Create a class' REQUIRES ACTUAL CODE.\n"
+                "     * Output clean raw code directly. Do NOT wrap code in markdown code fences (no ```).\n"
+                "     * If 'available_space' is 'compact', provide clean, concise code.\n"
+                "   - When 'response_mode' == 'CODE_AND_EXPLANATION':\n"
+                "     * Provide the complete code implementation first, followed by a brief, clear explanation (e.g. 'Explanation:\n...').\n"
+                "     * Do NOT omit the code implementation.\n"
+                "   - When 'response_mode' == 'ALGORITHM':\n"
+                "     * Provide a numbered, step-by-step algorithm.\n"
+                "   - When 'response_mode' == 'PSEUDOCODE':\n"
+                "     * Provide structured pseudocode without markdown code fences.\n"
+                "   - When 'response_mode' == 'OUTPUT_TRACE':\n"
+                "     * Provide the exact execution output or variable trace.\n"
+                "   - When 'response_mode' == 'TABLE_VALUE':\n"
+                "     * Provide concise cell values in target_answers.\n"
+                "   - When 'response_mode' == 'TEXT':\n"
+                "     * Provide plain student theory.\n"
+                "4. TABLE ACTIVITIES (CRITICAL - CELL-BY-CELL):\n"
+                "   - When a question has 'targets', provide a concise answer for EACH target in 'target_answers':\n"
+                "     'target_answers': { '<target_id>': '<concise 3-8 word student value>' }\n"
+                "   - Do NOT write paragraphs inside table cells! Keep answers as concise phrases (3 to 8 words).\n"
+                "   - NEVER write 'Answer: ...' inside cell values.\n"
+                "5. TICK / SELECT QUESTIONS:\n"
+                "   - Set 'selected_option' to the chosen option and 'answer_text' to the choice + 1-line rationale.\n"
+                "6. STRUCTURING LONG DELIVERABLES:\n"
+                "   - Use clean, standard numbering ('1.', '2.') or plain text capitalized labels on their own lines (e.g. 'Problem Statement:', 'Proposed Solution:'). Do NOT bold them.\n"
+                "7. RESPONSE SCHEMA:\n"
+                "   - Respond ONLY with a valid JSON object matching this schema:\n"
+                "{\n"
+                '  "answers": [\n'
+                "    {\n"
+                '      "question_id": "<exact question_id from input>",\n'
+                '      "question_number": "<question_number or null>",\n'
+                '      "response_mode": "<CODE | CODE_AND_EXPLANATION | TEXT | ALGORITHM | PSEUDOCODE | OUTPUT_TRACE | TABLE_VALUE>",\n'
+                '      "language": "<language or null>",\n'
+                '      "answer_text": "<clean, natural student answer or raw code without markdown fences>",\n'
+                '      "target_answers": {\n'
+                '        "<target_id>": "<concise student answer 3-8 words for this specific cell>"\n'
+                '      },\n'
+                '      "selected_option": "<option letter like A, B, C, D if MCQ, or chosen tick option, otherwise null>",\n'
+                '      "confidence": <float 0.0 to 1.0>,\n'
+                '      "explanation": "<brief rationale>"\n'
+                "    }\n"
+                "  ]\n"
+                "}"
+            )
 
-        user_prompt = (
-            f"Worksheet Context:\n"
-            f"- Course Code: {ws_context['course_code']}\n"
-            f"- Course Title: {ws_context['course_name']}\n"
-            f"- Session: {ws_context['session']}\n"
-            f"- SLO: {ws_context['slo']}\n\n"
-            "Guidelines per question:\n"
-            "1. Pay careful attention to 'response_mode' and 'language':\n"
-            "   - If 'response_mode' is 'CODE': You MUST write actual, valid code in 'language' (e.g. Java classes). Do NOT write theory!\n"
-            "   - If 'response_mode' is 'CODE_AND_EXPLANATION': Write the complete code first, followed by a concise explanation.\n"
-            "   - If 'response_mode' is 'ALGORITHM': Write clear algorithmic steps.\n"
-            "   - If 'response_mode' is 'PSEUDOCODE': Write structured pseudocode without markdown fences.\n"
-            "   - If 'response_mode' is 'OUTPUT_TRACE': Provide the exact output or trace.\n"
-            "   - If 'response_mode' is 'TEXT': Write concise, plain student text.\n"
-            "2. MCQ (Multiple Choice):\n"
-            "   - In 'selected_option', put the exact option letter (A, B, C, or D).\n"
-            "   - In 'answer_text', provide ONLY the plain text of the selected option (no markdown, no prefixes).\n"
-            "3. ONE_WORD / Fill-in-the-blank / True-False:\n"
-            "   - In 'answer_text', provide only the exact single term or True/False.\n"
-            "4. TABLE_CELL / Activity Tables:\n"
-            "   - For each target listed in 'targets', populate its 'target_id' in 'target_answers' with a concise 3-8 word value.\n"
-            "5. LONG_ANSWER / Case Study / Workshop / Simulation (5-16 marks):\n"
-            "   - In 'answer_text', write a thorough, well-reasoned response in natural student paragraphs.\n"
-            "   - If organizing into sections, use plain text labels on their own lines (e.g. 'Project Goals:', 'Tech Stack:', 'Challenges:') or standard numbering ('1.', '2.').\n"
-            "   - Absolutely NO markdown headers (###), NO bold text (**), and NO bullet asterisks (*).\n\n"
-            "Questions to answer:\n"
-            f"{json.dumps(questions_payload, indent=2)}"
-        )
+            user_prompt = (
+                f"Worksheet Context:\n"
+                f"- Course Code: {ws_context['course_code']}\n"
+                f"- Course Title: {ws_context['course_name']}\n"
+                f"- Session: {ws_context['session']}\n"
+                f"- SLO: {ws_context['slo']}\n\n"
+                "Guidelines per question:\n"
+                "1. Pay careful attention to 'response_mode' and 'language':\n"
+                "   - If 'response_mode' is 'CODE': You MUST write actual, valid code in 'language' (e.g. Java classes). Do NOT write theory!\n"
+                "   - If 'response_mode' is 'CODE_AND_EXPLANATION': Write the complete code first, followed by a concise explanation.\n"
+                "   - If 'response_mode' is 'ALGORITHM': Write clear algorithmic steps.\n"
+                "   - If 'response_mode' is 'PSEUDOCODE': Write structured pseudocode without markdown fences.\n"
+                "   - If 'response_mode' is 'OUTPUT_TRACE': Provide the exact output or trace.\n"
+                "   - If 'response_mode' is 'TEXT': Write concise, plain student text.\n"
+                "2. MCQ (Multiple Choice):\n"
+                "   - In 'selected_option', put the exact option letter (A, B, C, or D).\n"
+                "   - In 'answer_text', provide ONLY the plain text of the selected option (no markdown, no prefixes).\n"
+                "3. ONE_WORD / Fill-in-the-blank / True-False:\n"
+                "   - In 'answer_text', provide only the exact single term or True/False.\n"
+                "4. TABLE_CELL / Activity Tables:\n"
+                "   - For each target listed in 'targets', populate its 'target_id' in 'target_answers' with a concise 3-8 word value.\n"
+                "5. LONG_ANSWER / Case Study / Workshop / Simulation (5-16 marks):\n"
+                "   - In 'answer_text', write a thorough, well-reasoned response in natural student paragraphs.\n"
+                "   - If organizing into sections, use plain text labels on their own lines (e.g. 'Project Goals:', 'Tech Stack:', 'Challenges:') or standard numbering ('1.', '2.').\n"
+                "   - Absolutely NO markdown headers (###), NO bold text (**), and NO bullet asterisks (*).\n\n"
+                "Questions to answer:\n"
+                f"{json.dumps(questions_payload, indent=2)}"
+            )
 
         url = f"{self.base_url}/chat/completions"
         headers = {
@@ -2150,6 +2465,8 @@ class LLMAnswerEngine(BaseAnswerEngine):
         self,
         worksheet: ParsedWorksheet,
         context: Optional[Dict[str, Any]] = None,
+        is_code_regeneration: bool = False,
+        previous_error: str = "",
     ) -> WorksheetAnswers:
         """Perform real HTTP request to Gemini REST API and process structured JSON response."""
         questions_payload = self._build_questions_payload(worksheet)
@@ -2161,21 +2478,37 @@ class LLMAnswerEngine(BaseAnswerEngine):
             "slo": worksheet.slo or (context or {}).get("slo", ""),
         }
 
-        prompt = (
-            "You are a capable, knowledgeable college student writing exam and worksheet solutions.\n"
-            "Your writing must read like authentic student coursework: technically accurate, clear, and direct.\n\n"
-            "STRICT RULES (CRITICAL):\n"
-            "1. NO MARKDOWN ARTIFACTS OR FORMATTING IN 'answer_text':\n"
-            "   - Do NOT use markdown headers (no '#', '##', '###', '####').\n"
-            "   - Do NOT use bold markdown (no '**' or '__').\n"
-            "   - Do NOT use italics (no '*' or '_').\n"
-            "   - Do NOT use bullet points with asterisks or dashes (no '*' or '- ').\n"
-            "   - Write only in standard, natural English sentences and paragraphs.\n"
-            "2. NO AI PHRASING, INTROS, OR FILLER:\n"
-            "   - Never say 'Certainly!', 'Here is the answer:', 'As a college student...', 'In conclusion', or 'Furthermore'.\n"
-            "   - Answer directly and plainly without conversational preambles or robotic summaries.\n"
-            "3. STRUCTURING LONG DELIVERABLES:\n"
-            "   - Use clean, standard numbering ('1.', '2.') or plain text capitalized labels on their own lines (e.g. 'Problem Statement:', 'Proposed Solution:'). Do NOT bold them.\n\n"
+        if is_code_regeneration:
+            prompt = (
+                "You are an expert programmer and academic teaching assistant.\n"
+                "Your task is to write ONLY actual, executable, syntactically valid code for programming questions.\n\n"
+                "STRICT RULES (CRITICAL):\n"
+                "1. You MUST generate real, syntactically valid code in the requested language (e.g. Java classes with methods/fields).\n"
+                "2. NEVER output prose descriptions, conceptual theory, or instructional essays.\n"
+                "3. Do NOT wrap code in markdown code fences (no ```).\n"
+                "4. All requested constructs (classes, methods, threads, sleep, join, even/odd logic, etc.) must be implemented directly in the code.\n"
+                f"Previous Failure: {previous_error or 'Code validation failed or prose was returned instead of executable code.'}\n\n"
+                f"Questions to implement with REAL, COMPLETE CODE:\n"
+                f"{json.dumps(questions_payload, indent=2)}\n\n"
+                "Provide the complete executable code now.\n\n"
+                "CRITICAL: Return valid JSON matching schema with 'answers' list."
+            )
+        else:
+            prompt = (
+                "You are a capable, knowledgeable college student writing exam and worksheet solutions.\n"
+                "Your writing must read like authentic student coursework: technically accurate, clear, and direct.\n\n"
+                "STRICT RULES (CRITICAL):\n"
+                "1. NO MARKDOWN ARTIFACTS OR FORMATTING IN 'answer_text':\n"
+                "   - Do NOT use markdown headers (no '#', '##', '###', '####').\n"
+                "   - Do NOT use bold markdown (no '**' or '__').\n"
+                "   - Do NOT use italics (no '*' or '_').\n"
+                "   - Do NOT use bullet points with asterisks or dashes (no '*' or '- ').\n"
+                "   - Write only in standard, natural English sentences and paragraphs.\n"
+                "2. NO AI PHRASING, INTROS, OR FILLER:\n"
+                "   - Never say 'Certainly!', 'Here is the answer:', 'As a college student...', 'In conclusion', or 'Furthermore'.\n"
+                "   - Answer directly and plainly without conversational preambles or robotic summaries.\n"
+                "3. STRUCTURING LONG DELIVERABLES:\n"
+                "   - Use clean, standard numbering ('1.', '2.') or plain text capitalized labels on their own lines (e.g. 'Problem Statement:', 'Proposed Solution:'). Do NOT bold them.\n\n"
             f"Worksheet Context:\n"
             f"- Course Code: {ws_context['course_code']}\n"
             f"- Course Title: {ws_context['course_name']}\n"

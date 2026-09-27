@@ -659,11 +659,10 @@ class DocxWorksheetParser(BaseWorksheetParser):
     ) -> None:
         """Attach trailing empty paragraphs if needed, classify, and add to question list."""
         if pending_empty_paragraphs:
-            # If earlier questions exist and none of them had targets, a single trailing
-            # empty paragraph at EOF is just Word's default trailing newline, not an answer target.
+            # If earlier questions exist and none of them had targets, trailing
+            # empty paragraphs at EOF are Word's default trailing spacing, not an answer target.
             is_isolated_eof = (
-                len(pending_empty_paragraphs) == 1
-                and len(questions) > 0
+                len(questions) > 0
                 and not any(q.targets for q in questions)
             )
             if not is_isolated_eof and not current_question.targets:

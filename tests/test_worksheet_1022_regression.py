@@ -96,13 +96,13 @@ async def test_1022_freellm_generation_and_filling_end_to_end(worksheet_1022_pat
         {
             "question_id": parsed_ws.questions[0].question_id,
             "question_number": "1",
-            "answer_text": "An interface defines method contracts. A class uses the implements keyword to provide concrete method implementations.",
+            "answer_text": "interface Printable {\n    void print();\n}\n\nclass Document implements Printable {\n    public void print() {\n        System.out.println(\"Document printed successfully.\");\n    }\n}",
             "confidence": 0.96,
         },
         {
             "question_id": parsed_ws.questions[1].question_id,
             "question_number": "2",
-            "answer_text": "Private variables encapsulate internal state, while public methods expose necessary operations, hiding implementation complexity.",
+            "answer_text": "class BankAccount {\n    private double balance;\n\n    public BankAccount(double balance) {\n        this.balance = balance;\n    }\n\n    public double getBalance() {\n        return this.balance;\n    }\n}",
             "confidence": 0.94,
         },
         {
@@ -170,13 +170,13 @@ async def test_1022_freellm_generation_and_filling_end_to_end(worksheet_1022_pat
     # Verify Answer 1 is placed directly under Question 1 (before Question 2)
     ans1_p = doc_paragraphs[q1_idx + 1]
     assert "Answer:" in ans1_p
-    assert "interface defines method contracts" in ans1_p
+    assert "interface Printable" in ans1_p
     assert q1_idx + 1 < q2_idx, "Answer 1 must be positioned before Question 2"
 
     # Verify Answer 2 is placed directly under Question 2 (before Question 3)
     ans2_p = doc_paragraphs[q2_idx + 1]
     assert "Answer:" in ans2_p
-    assert "Private variables encapsulate" in ans2_p
+    assert "class BankAccount" in ans2_p
     assert q2_idx + 1 < q3_idx, "Answer 2 must be positioned before Question 3"
 
     # Verify Answer 3 is placed directly under Question 3

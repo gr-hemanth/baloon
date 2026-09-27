@@ -29,7 +29,7 @@ class CodeIntentDetector:
     CODE_IMPL_VERBS = [
         re.compile(r"\b(?:write|implement|code|program|develop|design|construct|create|build)\b", re.IGNORECASE),
         re.compile(r"\b(?:override|overload|inherit|extend|instantiate|declare|modify|convert)\b", re.IGNORECASE),
-        re.compile(r"\bdemonstrate\s+(?:using|with|by)\s+code\b", re.IGNORECASE),
+        re.compile(r"\bdemonstrate\b", re.IGNORECASE),
         re.compile(r"\bcomplete\s+(?:the\s+)?(?:code|function|class|method)\b", re.IGNORECASE),
     ]
 
@@ -48,10 +48,12 @@ class CodeIntentDetector:
     PROGRAMMING_CONSTRUCTS = [
         re.compile(r"\b(?:class\s+hierarchy|superclass|subclass|base\s+class|derived\s+class)\b", re.IGNORECASE),
         re.compile(r"\b(?:class|interface|abstract\s+class|constructor|method|function)\b", re.IGNORECASE),
-        re.compile(r"\b(?:inheritance|polymorphism|encapsulation|overriding|overloading)\b", re.IGNORECASE),
+        re.compile(r"\b(?:inheritance|polymorphism|encapsulation|overriding|overloading|abstraction)\b", re.IGNORECASE),
         re.compile(r"\b(?:super|this|extends|implements|try-catch|exception|pointer|struct)\b", re.IGNORECASE),
         re.compile(r"\b(?:linked\s+list|binary\s+tree|stack|queue|hashmap|arraylist|array)\b", re.IGNORECASE),
         re.compile(r"\b(?:sql\s+query|select\s+query|stored\s+procedure|schema|table)\b", re.IGNORECASE),
+        re.compile(r"\b(?:threads?|multithreading|runnable|concurrency|synchronization|synchronized|deadlock|sleep|join|wait|notify)\b", re.IGNORECASE),
+        re.compile(r"\b(?:stream|lambda|generics|collection|iterator|socket|event|listener|regex|scanner)\b", re.IGNORECASE),
     ]
 
     # Algorithm / Pseudocode / Output trace patterns
@@ -275,7 +277,9 @@ class QuestionClassifier:
     CODE_KEYWORDS = [
         re.compile(r"\bwrite\s+(?:a\s+)?(?:java|python|c\+\+|c#|c|sql|javascript|html|css)\b", re.IGNORECASE),
         re.compile(r"\bwrite\s+(?:a\s+)?(?:program|function|method|class|interface|query|script|code)\b", re.IGNORECASE),
-        re.compile(r"\bimplement\s+(?:a\s+)?(?:class|interface|method|function)\b", re.IGNORECASE),
+        re.compile(r"\bimplement\s+(?:a\s+)?(?:class|interface|method|function|threads?|program|algorithm)\b", re.IGNORECASE),
+        re.compile(r"\bcreate\s+(?:two\s+|a\s+|multiple\s+)?(?:threads?)\b", re.IGNORECASE),
+        re.compile(r"\bdemonstrate\s+(?:.*?\b)?(?:threads?|sleep|join)\b", re.IGNORECASE),
     ]
 
     # Pseudocode keywords

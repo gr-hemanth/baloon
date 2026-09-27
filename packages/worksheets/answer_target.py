@@ -558,7 +558,7 @@ class TargetWriter:
             self._write_content_control(doc, target.sdt_element, lines)
 
         elif target.target_type == AnswerTargetType.NEW_PARAGRAPH_ANCHOR:
-            self._write_new_paragraph_anchor(target.paragraph_obj, lines)
+            self._write_new_paragraph_anchor(target.paragraph_obj, lines, is_code=is_code)
 
         else:
             raise WorksheetFillingError(f"Unsupported target type: {target.target_type}")
@@ -974,7 +974,7 @@ class TargetWriter:
             r.font.color.rgb = ANSWER_COLOR_RGB
             r.font.size = Pt(10.5)
 
-    def _write_new_paragraph_anchor(self, anchor_p: Paragraph, lines: List[str]) -> None:
+    def _write_new_paragraph_anchor(self, anchor_p: Paragraph, lines: List[str], is_code: bool = False) -> None:
         """Insert new paragraph immediately following anchor paragraph."""
         parent_doc = anchor_p._parent
         current_anchor = anchor_p
@@ -988,24 +988,31 @@ class TargetWriter:
         label_run.font.color.rgb = ANSWER_COLOR_RGB
         label_run.font.size = Pt(10.5)
 
+        in_explanation = False
         if lines:
-            text_run = ans_p.add_run(lines[0])
-            text_run.font.color.rgb = ANSWER_COLOR_RGB
-            text_run.font.size = Pt(10.5)
+            line0 = lines[0]
+            if line0.strip().lower().startswith("explanation:"):
+                in_explanation = True
+            is_code_line0 = is_code and not in_explanation
+            text_run = ans_p.add_run(line0 if is_code else line0.strip())
+            self._style_line_run(ans_p, text_run, line0, is_code, is_code_line0)
         current_anchor = ans_p
 
         for line in lines[1:]:
-            if not line.strip():
+            if not line.strip() and not is_code:
                 continue
+            if line.strip().lower().startswith("explanation:"):
+                in_explanation = True
+            is_code_line = is_code and not in_explanation
+
             line_elm = current_anchor._p.getparent()._new_p()
             current_anchor._p.addnext(line_elm)
             line_p = Paragraph(line_elm, parent_doc)
 
-            run = line_p.add_run(line)
-            if re.match(r"^\d+\.\s+[A-Za-z]", line.strip()):
+            run = line_p.add_run(line if is_code else line.strip())
+            if not is_code and re.match(r"^\d+\.\s+[A-Za-z]", line.strip()):
                 run.bold = True
-            run.font.color.rgb = ANSWER_COLOR_RGB
-            run.font.size = Pt(10.5)
+            self._style_line_run(line_p, run, line, is_code, is_code_line)
             current_anchor = line_p
 
     def _highlight_mcq_option(self, doc: docx.Document, question: ParsedQuestion, selected_option: str) -> None:

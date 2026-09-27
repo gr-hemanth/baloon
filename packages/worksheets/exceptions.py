@@ -8,6 +8,11 @@ class AnswerEngineError(Exception):
     pass
 
 
+class AnswerGenerationError(AnswerEngineError):
+    """Raised when answer generation fails validation or cannot produce a valid code answer."""
+    pass
+
+
 class LLMAuthenticationError(AnswerEngineError):
     """Raised when API key is invalid, unauthorized, or unconfigured when required."""
     pass
