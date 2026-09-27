@@ -9,6 +9,12 @@ import {
   createJob,
   getJob,
   submitCaptchaSolution,
+  listJobs,
+  submitJobToSrm,
+  cancelJob,
+  getJobDownloadUrl,
+  getStatusUI,
+  STATUS_UI_MAP,
   CourseItem,
   WorksheetItem,
   JobResponse,
@@ -21,9 +27,10 @@ const PIPELINE_STEPS = [
   { key: "DOWNLOADING", title: "4. DOWNLOADING", desc: "Downloading worksheet document" },
   { key: "PROCESSING", title: "5. PROCESSING", desc: "Parsing & answering via NVIDIA (FreeLLM fallback)" },
   { key: "UPLOADING", title: "6. UPLOADING", desc: "Storing in Google Drive (Anyone with link / Viewer)" },
-  { key: "SUBMITTING", title: "7. SUBMITTING", desc: "Submitting verified link to SRM portal" },
-  { key: "VERIFYING", title: "8. VERIFYING", desc: "Confirming portal practice status update" },
-  { key: "COMPLETED", title: "9. COMPLETED", desc: "Successfully finished and verified" },
+  { key: "AWAITING_USER_REVIEW", title: "7. AWAITING_USER_REVIEW", desc: "Your completed worksheet is ready for review." },
+  { key: "SUBMITTING", title: "8. SUBMITTING", desc: "Submitting verified link to SRM portal" },
+  { key: "VERIFYING", title: "9. VERIFYING", desc: "Confirming portal practice status update" },
+  { key: "COMPLETED", title: "10. COMPLETED", desc: "Successfully finished and verified" },
 ];
 
 export default function DashboardPage() {
@@ -48,6 +55,11 @@ export default function DashboardPage() {
   const [isStartingJob, setIsStartingJob] = useState(false);
   const [jobError, setJobError] = useState<string | null>(null);
 
+  // Submit to SRM Confirmation Modal State
+  const [showSubmitModal, setShowSubmitModal] = useState(false);
+  const [isSubmittingToSrm, setIsSubmittingToSrm] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
   // CAPTCHA Modal State
   const [showCaptcha, setShowCaptcha] = useState(false);
   const [captchaContext, setCaptchaContext] = useState<"discovery" | "job" | null>(null);
@@ -56,10 +68,91 @@ export default function DashboardPage() {
   const [captchaError, setCaptchaError] = useState<string | null>(null);
   const [isSubmittingCaptcha, setIsSubmittingCaptcha] = useState(false);
 
-  // Load Google Drive Status on Mount
+  // Helper to determine if a job is genuinely active (persisting AWAITING_USER_REVIEW until explicit submission)
+  const isGenuinelyActive = (job: JobResponse | null): boolean => {
+    if (!job || !job.status) return false;
+    if (job.status === "AWAITING_USER_REVIEW") return true; // Review state persists until explicit user submission
+    const ageMs = job.created_at ? Date.now() - new Date(job.created_at).getTime() : Infinity;
+    if (job.status === "SUBMITTING" || job.status === "VERIFYING") return ageMs < 600000;
+    if (ageMs > 900000) return false;
+    if (
+      job.status === "WAITING_FOR_CAPTCHA" ||
+      job.status === "RUNNING" ||
+      job.status === "DOWNLOADING" ||
+      job.status === "PROCESSING" ||
+      job.status === "UPLOADING"
+    ) {
+      return true;
+    }
+    if (job.status === "PENDING") return ageMs < 180000;
+    return false;
+  };
+
+  // Helper to update state and synchronize with localStorage
+  const setAndStoreActiveJob = (job: JobResponse | null) => {
+    setActiveJob(job);
+    try {
+      if (
+        job &&
+        job.status !== "COMPLETED" &&
+        (job.status !== "FAILED" || job.drive_web_view_link || job.result?.drive_web_url)
+      ) {
+        localStorage.setItem("srm_active_job_id", job.id);
+      } else if (job?.status === "COMPLETED") {
+        localStorage.removeItem("srm_active_job_id");
+      }
+    } catch {}
+  };
+
+  const handleDismissJob = () => {
+    setActiveJob(null);
+    try {
+      localStorage.removeItem("srm_active_job_id");
+    } catch {}
+  };
+
+  // Load Google Drive Status and Auto-Detect Active Job on Mount / Page Refresh
   useEffect(() => {
     checkDrive();
+    checkActiveJobOnLoad();
   }, []);
+
+  const checkActiveJobOnLoad = async () => {
+    let candidateId: string | null = null;
+    try {
+      candidateId = localStorage.getItem("srm_active_job_id");
+    } catch {}
+
+    if (candidateId) {
+      try {
+        const job = await getJob(candidateId);
+        if (isGenuinelyActive(job)) {
+          setActiveJob(job);
+          return;
+        } else {
+          try {
+            localStorage.removeItem("srm_active_job_id");
+          } catch {}
+        }
+      } catch (e) {
+        console.warn("Could not check saved active job:", e);
+      }
+    }
+
+    // Auto-detect any active background job from server
+    try {
+      const recentJobs = await listJobs(5);
+      const active = recentJobs.find(isGenuinelyActive);
+      if (active) {
+        try {
+          localStorage.setItem("srm_active_job_id", active.id);
+        } catch {}
+        setActiveJob(active);
+      }
+    } catch (e) {
+      console.warn("Could not query active jobs:", e);
+    }
+  };
 
   const checkDrive = async () => {
     try {
@@ -123,7 +216,7 @@ export default function DashboardPage() {
         transport_mode: transportMode,
         credentials: { USER_ID: userId, PASSWORD: password },
       });
-      setActiveJob(job);
+      setAndStoreActiveJob(job);
       if (job.status === "WAITING_FOR_CAPTCHA") {
         setCaptchaContext("job");
         setCaptchaChallenge(job.captcha_challenge);
@@ -136,7 +229,7 @@ export default function DashboardPage() {
         alert("Notice: " + err.message);
         // Resume tracking existing active job
         const existing = await getJob(err.existingJobId);
-        setActiveJob(existing);
+        setAndStoreActiveJob(existing);
       } else {
         setJobError(err.message);
       }
@@ -147,10 +240,15 @@ export default function DashboardPage() {
 
   // Poll Active Job
   useEffect(() => {
-    if (!activeJob || activeJob.status === "COMPLETED" || activeJob.status === "FAILED") {
+    if (
+      !activeJob ||
+      activeJob.status === "COMPLETED" ||
+      (activeJob.status === "FAILED" && !activeJob.drive_web_view_link && !activeJob.result?.drive_web_url)
+    ) {
       return;
     }
 
+    const pollIntervalMs = activeJob.status === "AWAITING_USER_REVIEW" ? 2500 : 1500;
     const timer = setInterval(async () => {
       try {
         const updated = await getJob(activeJob.id);
@@ -167,13 +265,19 @@ export default function DashboardPage() {
           setCaptchaChallenge(null);
           setCaptchaContext(null);
         }
+
+        if (updated.status === "COMPLETED") {
+          try {
+            localStorage.removeItem("srm_active_job_id");
+          } catch {}
+        }
       } catch (e) {
         console.warn("Poll failed:", e);
       }
-    }, 1500);
+    }, pollIntervalMs);
 
     return () => clearInterval(timer);
-  }, [activeJob, captchaContext, isSubmittingCaptcha]);
+  }, [activeJob?.id, activeJob?.status, captchaContext, isSubmittingCaptcha]);
 
   // Submit CAPTCHA
   const handleCaptchaSubmit = async (e: React.FormEvent) => {
@@ -203,7 +307,7 @@ export default function DashboardPage() {
         }
       } else if (captchaContext === "job" && activeJob) {
         const updated = await submitCaptchaSolution(activeJob.id, sol);
-        setActiveJob(updated);
+        setAndStoreActiveJob(updated);
         setShowCaptcha(false);
         setCaptchaChallenge(null);
         setCaptchaSolution("");
@@ -221,6 +325,22 @@ export default function DashboardPage() {
       }
     } finally {
       setIsSubmittingCaptcha(false);
+    }
+  };
+
+  // Submit to SRM confirmation
+  const handleConfirmSubmitToSrm = async () => {
+    if (!activeJob || isSubmittingToSrm) return;
+    setIsSubmittingToSrm(true);
+    setSubmitError(null);
+    try {
+      const updated = await submitJobToSrm(activeJob.id, { USER_ID: userId, PASSWORD: password });
+      setAndStoreActiveJob(updated);
+      setShowSubmitModal(false);
+    } catch (err: any) {
+      setSubmitError(err.message || "Failed to submit to SRM portal");
+    } finally {
+      setIsSubmittingToSrm(false);
     }
   };
 
@@ -469,16 +589,10 @@ export default function DashboardPage() {
                 </div>
                 <div
                   className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider ${
-                    activeJob?.status === "COMPLETED"
-                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                      : activeJob?.status === "FAILED"
-                      ? "bg-red-500/10 text-red-400 border border-red-500/20"
-                      : activeJob?.status === "WAITING_FOR_CAPTCHA"
-                      ? "bg-amber-500/10 text-amber-400 border border-amber-500/20 pulse-dot"
-                      : "bg-blue-500/10 text-blue-400 border border-blue-500/20"
+                    activeJob ? getStatusUI(activeJob.status).badgeClass : "bg-slate-800 text-slate-400 border border-slate-700"
                   }`}
                 >
-                  {activeJob ? activeJob.status : "IDLE"}
+                  {activeJob ? getStatusUI(activeJob.status).label : "IDLE"}
                 </div>
               </div>
 
@@ -490,9 +604,22 @@ export default function DashboardPage() {
                 <div>
                   Current Step:{" "}
                   <span className="text-blue-400 font-medium">
-                    {activeJob ? activeJob.current_step || activeJob.status : "Waiting to start"}
+                    {activeJob
+                      ? activeJob.status === "AWAITING_USER_REVIEW"
+                        ? "Waiting for your review/approval"
+                        : activeJob.current_step || getStatusUI(activeJob.status).label
+                      : "Waiting to start"}
                   </span>
                 </div>
+                {activeJob && (
+                  <button
+                    type="button"
+                    onClick={handleDismissJob}
+                    className="text-[11px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white border border-slate-700 transition"
+                  >
+                    Clear / New
+                  </button>
+                )}
               </div>
 
               {/* 10-State Stepper */}
@@ -501,14 +628,14 @@ export default function DashboardPage() {
                   const currentIdx = activeJob
                     ? PIPELINE_STEPS.findIndex((s) => s.key === activeJob.status)
                     : -1;
-                  const isCompleted = activeJob?.status === "COMPLETED" || idx < currentIdx;
+                  const isCompleted = activeJob?.status === "COMPLETED" || (currentIdx !== -1 && idx < currentIdx);
                   const isActive = activeJob?.status === step.key;
 
                   let dotClass = "bg-slate-800 border-slate-700";
                   let textClass = "text-slate-500";
 
                   if (activeJob?.status === "FAILED") {
-                    if (idx <= currentIdx) {
+                    if (currentIdx !== -1 && idx <= currentIdx) {
                       dotClass = "bg-red-600 border-red-400";
                       textClass = "text-red-400 font-semibold";
                     }
@@ -516,8 +643,13 @@ export default function DashboardPage() {
                     dotClass = "bg-emerald-500 border-emerald-400";
                     textClass = "text-emerald-400 font-semibold";
                   } else if (isActive) {
-                    dotClass = "bg-blue-500 border-white pulse-dot";
-                    textClass = "text-blue-300 font-semibold";
+                    if (step.key === "AWAITING_USER_REVIEW" || step.key === "WAITING_FOR_CAPTCHA") {
+                      dotClass = "bg-amber-500 border-amber-300 pulse-dot";
+                      textClass = "text-amber-300 font-semibold";
+                    } else {
+                      dotClass = "bg-blue-500 border-white pulse-dot";
+                      textClass = "text-blue-300 font-semibold";
+                    }
                   }
 
                   return (
@@ -536,6 +668,98 @@ export default function DashboardPage() {
                 </div>
               )}
             </div>
+
+            {/* Prominent Review Card (AWAITING_USER_REVIEW) */}
+            {(activeJob?.status === "AWAITING_USER_REVIEW" ||
+              (activeJob?.status === "FAILED" && (activeJob.drive_web_view_link || activeJob.result?.drive_web_url))) && (
+              <div className="bg-slate-950 border border-amber-500/40 rounded-xl p-5 shadow-xl space-y-4 text-xs">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                  <div>
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-amber-400 flex items-center gap-2">
+                      FINAL WORKSHEET READY
+                    </h2>
+                    <p className="text-xs text-slate-300 mt-1">
+                      Your worksheet has been generated and uploaded to Google Drive.
+                    </p>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Review the document before submitting it to SRM.
+                    </p>
+                  </div>
+                  <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 font-bold pulse-dot">
+                    Waiting for your approval
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 p-3 rounded-lg bg-slate-900/80 border border-slate-800">
+                  <div>
+                    <span className="text-slate-400 block text-[11px] mb-0.5">Worksheet:</span>
+                    <span className="text-white font-medium text-xs">
+                      {(activeJob.result?.course_code || activeJob.course_id || "Course")} – Session {(activeJob.result?.session ?? "")} – SLO {(activeJob.result?.slo ?? "")}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 block text-[11px] mb-0.5">Questions Answered:</span>
+                    <span className="text-emerald-400 font-medium text-xs">
+                      {(activeJob.answers_count ?? activeJob.result?.answers_count ?? "--")} / {(activeJob.questions_count ?? activeJob.result?.questions_count ?? "--")}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-lg bg-slate-900 border border-slate-800 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-300 font-medium">Google Drive Document:</span>
+                    <span className="px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-300 font-mono text-[10px] border border-emerald-800/60">
+                      {activeJob.result?.drive_permission_status || "VERIFIED_PUBLIC_READER"}
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Drive Link:</label>
+                    <input
+                      type="text"
+                      readOnly
+                      value={activeJob.drive_web_view_link || activeJob.result?.drive_web_url || ""}
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-slate-200 font-mono text-xs select-all"
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <a
+                      href={activeJob.drive_web_view_link || activeJob.result?.drive_web_url || "#"}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={`py-2 px-3.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center gap-2 transition shadow-md shadow-blue-600/20 ${
+                        !(activeJob.drive_web_view_link || activeJob.result?.drive_web_url) ? "opacity-50 pointer-events-none" : ""
+                      }`}
+                    >
+                      ↗ View Final Document
+                    </a>
+                    <a
+                      href={getJobDownloadUrl(activeJob.id)}
+                      download
+                      className="py-2 px-3.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 hover:text-white font-medium flex items-center gap-2 transition"
+                    >
+                      ⬇ Download Completed Worksheet
+                    </a>
+                  </div>
+                </div>
+
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowSubmitModal(true)}
+                    disabled={activeJob.submission_allowed === false && !activeJob.drive_web_view_link && !activeJob.result?.drive_web_url}
+                    className="w-full py-3 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <span>Submit to SRM</span>
+                  </button>
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 mt-2 px-1">
+                    <span>Status: <strong className="text-amber-300">Waiting for your approval</strong></span>
+                    <span className="text-slate-500">"Submit to SRM" will not occur automatically. Inspect the document above, then click to confirm submission.</span>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Deliverables Card */}
             {activeJob?.status === "COMPLETED" && activeJob.result && (
@@ -674,6 +898,47 @@ export default function DashboardPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Submit Confirmation Modal */}
+      {showSubmitModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-950 border border-slate-700 rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-amber-400">
+              <span className="text-xl">⚠️</span>
+              <h3 className="font-bold text-base text-white">Confirm SRM Submission</h3>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Your completed worksheet is ready. Do you want to submit it to SRM?
+            </p>
+            {submitError && (
+              <div className="p-3 rounded-lg bg-red-950/60 border border-red-800 text-red-200 text-xs">
+                {submitError}
+              </div>
+            )}
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                type="button"
+                disabled={isSubmittingToSrm}
+                onClick={() => {
+                  setShowSubmitModal(false);
+                  setSubmitError(null);
+                }}
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isSubmittingToSrm}
+                onClick={handleConfirmSubmitToSrm}
+                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition disabled:opacity-50"
+              >
+                {isSubmittingToSrm ? "Submitting..." : "Submit to SRM"}
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -93,6 +93,7 @@ async def _run_job_workflow(
     drive_client: Optional[BaseDriveClient] = None,
     pipeline: Optional[WorksheetPipeline] = None,
     db_session: Optional[Any] = None,
+    auto_submit: bool = False,
 ) -> None:
     """Async execution workflow for end-to-end SRM worksheet automation (Milestone 7).
 
@@ -496,18 +497,185 @@ async def _run_job_workflow(
                 drive_web_url = upload_meta.web_url
                 drive_permission_status = upload_meta.permission_status
 
-            # 10. State: SUBMITTING (Submit link to SRM)
-            job.status = JobStatus.SUBMITTING
-            job.current_step = "submitting_link_to_srm"
+            # Transition to AWAITING_USER_REVIEW (Pause and await explicit user submission)
+            job.status = JobStatus.AWAITING_USER_REVIEW
+            job.current_step = "awaiting_user_review"
+            job.error_message = None
+            review_result = {
+                "course_code": course_code,
+                "course_name": course_name,
+                "semester": target_semester,
+                "session": session_num,
+                "slo": slo_num,
+                "batch_id": batch_id,
+                "original_file": str(downloaded_file.name),
+                "original_file_path": str(downloaded_file.resolve()),
+                "completed_file": str(completed_file.name),
+                "completed_file_path": str(completed_file.resolve()),
+                "drive_file_id": drive_file_id,
+                "drive_web_url": drive_web_url,
+                "drive_permission_status": drive_permission_status,
+                "drive_verified": True,
+                "review_ready": True,
+                "submission_allowed": True,
+                "questions_count": pipeline_result.summary.get("total_questions") if pipeline_result else None,
+                "answers_count": pipeline_result.summary.get("answers_generated") if pipeline_result else None,
+                "transport_used": orchestrator.transport_name if orchestrator else (job.transport_mode or "auto"),
+                "review_ready_at": datetime.now(timezone.utc).isoformat(),
+            }
+            job.result = review_result
             job.updated_at = datetime.now(timezone.utc)
             db.commit()
 
+            logger.info(
+                "Job %s reached AWAITING_USER_REVIEW: completed worksheet %s uploaded to Drive (%s)",
+                job_id, completed_file.name, drive_web_url,
+            )
+
+            # Store credentials ephemerally so they remain available for user submission
+            if credentials:
+                store_job_credentials(job_id, credentials)
+
+            if not auto_submit:
+                return
+
+            await _run_submission_workflow(
+                job_id=job_id,
+                credentials=credentials,
+                orchestrator=orchestrator,
+                drive_client=drive_client,
+                db_session=db,
+            )
+
+        except (CaptchaRequired, SRMCaptchaRequired) as captcha_exc:
+            logger.warning("Job %s entering WAITING_FOR_CAPTCHA state", job_id)
+            job.status = JobStatus.WAITING_FOR_CAPTCHA
+            job.current_step = "waiting_for_user_captcha"
+            job.captcha_challenge = getattr(captcha_exc, "challenge_data", None) or {"message": str(captcha_exc)}
+            job.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            if credentials:
+                store_job_credentials(job_id, credentials)
+
+        except Exception as exc:
+            err_msg = redact_sensitive_info(str(exc))
+            logger.exception("Job %s encountered error: %s", job_id, err_msg)
+            if job is not None:
+                job.status = JobStatus.FAILED
+                job.current_step = "failed"
+                job.error_message = err_msg
+                job.updated_at = datetime.now(timezone.utc)
+                db.commit()
+            clear_job_credentials(job_id)
+
+        finally:
+            if close_orchestrator and orchestrator:
+                await orchestrator.close()
+
+    finally:
+        if should_close_db:
+            db.close()
+
+
+async def _run_submission_workflow(
+    job_id: str,
+    credentials: Optional[Dict[str, Any]] = None,
+    orchestrator: Optional[SRMOrchestrator] = None,
+    drive_client: Optional[BaseDriveClient] = None,
+    db_session: Optional[Any] = None,
+) -> None:
+    """Async execution workflow for explicit user-triggered SRM submission.
+
+    Phases:
+    1. Validation: Job in AWAITING_USER_REVIEW (or retryable FAILED), Drive link verified.
+    2. SUBMITTING: Connects to SRM portal, checks session status idempotency, submits Drive link.
+    3. VERIFYING: Verifies submission confirmation on SRM.
+    4. COMPLETED: Records completion timestamp, verified status, and clears ephemeral credentials.
+    """
+    db = db_session if db_session is not None else SessionLocal()
+    should_close_db = db_session is None
+    close_orchestrator = False
+
+    try:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            logger.error("Job %s not found in database for submission", job_id)
+            return
+
+        # State check: allow AWAITING_USER_REVIEW, SUBMITTING, or retryable FAILED
+        if job.status not in (JobStatus.AWAITING_USER_REVIEW, JobStatus.SUBMITTING, JobStatus.FAILED):
+            if job.status == JobStatus.COMPLETED:
+                logger.info("Job %s is already COMPLETED", job_id)
+                return
+            logger.warning("Job %s in status %s is not eligible for submission", job_id, job.status)
+            return
+
+        res = dict(job.result or {})
+        drive_web_url = res.get("drive_web_url")
+        drive_file_id = res.get("drive_file_id")
+
+        if not drive_web_url or not drive_file_id:
+            logger.error("Job %s missing Drive file/link; cannot submit to SRM", job_id)
+            job.status = JobStatus.FAILED
+            job.error_message = "Cannot submit to SRM: Google Drive link is missing or unverified"
+            job.current_step = "submission_failed_missing_drive_link"
+            job.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            return
+
+        # Optional / Best-effort Drive public verification
+        if drive_client is not None:
+            try:
+                verified = await drive_client.verify_file_public_access(drive_file_id)
+                if not verified:
+                    logger.warning("Drive verification returned False for file %s", drive_file_id)
+            except Exception as d_err:
+                logger.warning("Drive verification check warning for %s: %s", drive_file_id, d_err)
+
+        # Transition to SUBMITTING
+        job.status = JobStatus.SUBMITTING
+        job.current_step = "submitting_link_to_srm"
+        job.error_message = None
+        res["submission_started_at"] = datetime.now(timezone.utc).isoformat()
+        job.result = res
+        job.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+        # Resolve credentials
+        if credentials:
+            store_job_credentials(job_id, credentials)
+        else:
+            credentials = get_job_credentials(job_id) or {}
+
+        if orchestrator is None:
+            orchestrator = SRMOrchestrator(mode=job.transport_mode or "auto")
+            close_orchestrator = True
+            await orchestrator.connect()
+            job.transport_mode = orchestrator.transport_name
+            db.commit()
+
+            if credentials:
+                auth_creds = dict(credentials)
+                if job.captcha_solution:
+                    auth_creds["captcha_solution"] = job.captcha_solution
+                    auth_creds["captcha"] = job.captcha_solution
+                await orchestrator.authenticate(auth_creds)
+
+        try:
+
+            # Metadata for submission
+            course_code = res.get("course_code") or job.course_id
+            course_name = res.get("course_name") or "Course"
+            batch_id = res.get("batch_id") or "B1"
+            session_num = int(res.get("session") or 1)
+            slo_num = int(res.get("slo") or 1)
+
+            # Idempotency check: see if session is already submitted or verified on SRM
             session_status = await orchestrator.get_session_status(
                 course_info={"BATCH_ID": batch_id, "COURSE_CODE": course_code},
                 session=session_num,
             )
 
-            # Idempotency check: skip submission if link already recorded or practice_status is 2 (verified)
             already_submitted = False
             if session_status:
                 key_full = f"{session_num}{slo_num}"
@@ -563,7 +731,7 @@ async def _run_job_workflow(
                 if not sub_result.success:
                     raise SRMException(f"SRM link submission failed: {sub_result.message}")
 
-            # 11. State: VERIFYING (Verify submission on SRM)
+            # State: VERIFYING
             job.status = JobStatus.VERIFYING
             job.current_step = "verifying_submission_on_srm"
             job.updated_at = datetime.now(timezone.utc)
@@ -580,55 +748,36 @@ async def _run_job_workflow(
                     f"Submission verification failed on SRM for {course_code} Session {session_num}"
                 )
 
-            # 12. State: COMPLETED (Store non-sensitive structured summary)
+            # State: COMPLETED
             job.status = JobStatus.COMPLETED
             job.current_step = "workflow_completed"
             job.error_message = None
-            job.result = {
-                "course_code": course_code,
-                "course_name": course_name,
-                "semester": target_semester,
-                "session": session_num,
-                "slo": slo_num,
-                "original_file": str(downloaded_file.name),
-                "original_file_path": str(downloaded_file.resolve()),
-                "completed_file": str(completed_file.name),
-                "completed_file_path": str(completed_file.resolve()),
-                "drive_file_id": drive_file_id,
-                "drive_web_url": drive_web_url,
-                "drive_permission_status": drive_permission_status,
+            res = dict(job.result or {})
+            res.update({
                 "practice_status": 2,
-                "questions_count": pipeline_result.summary.get("total_questions") if pipeline_result else None,
-                "answers_count": pipeline_result.summary.get("answers_generated") if pipeline_result else None,
                 "verification_status": "VERIFIED",
                 "transport_used": orchestrator.transport_name,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
-            }
+                "submission_verified_at": datetime.now(timezone.utc).isoformat(),
+            })
+            job.result = res
             job.updated_at = datetime.now(timezone.utc)
             db.commit()
             clear_job_credentials(job_id)
-            logger.info("End-to-end background job %s successfully COMPLETED", job_id)
-
-        except (CaptchaRequired, SRMCaptchaRequired) as captcha_exc:
-            logger.warning("Job %s entering WAITING_FOR_CAPTCHA state", job_id)
-            job.status = JobStatus.WAITING_FOR_CAPTCHA
-            job.current_step = "waiting_for_user_captcha"
-            job.captcha_challenge = getattr(captcha_exc, "challenge_data", None) or {"message": str(captcha_exc)}
-            job.updated_at = datetime.now(timezone.utc)
-            db.commit()
-            if credentials:
-                store_job_credentials(job_id, credentials)
+            logger.info("Explicit SRM submission workflow for job %s COMPLETED successfully", job_id)
 
         except Exception as exc:
             err_msg = redact_sensitive_info(str(exc))
-            logger.exception("Job %s encountered error: %s", job_id, err_msg)
+            logger.exception("Job %s submission encountered error: %s", job_id, err_msg)
             if job is not None:
                 job.status = JobStatus.FAILED
-                job.current_step = "failed"
+                job.current_step = "submission_failed"
                 job.error_message = err_msg
+                res = dict(job.result or {})
+                res["submission_allowed"] = True
+                job.result = res
                 job.updated_at = datetime.now(timezone.utc)
                 db.commit()
-            clear_job_credentials(job_id)
 
         finally:
             if close_orchestrator and orchestrator:
@@ -648,5 +797,18 @@ def process_job(self, job_id: str, credentials: Optional[Dict[str, Any]] = None)
             asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
         except Exception:
             pass
-    asyncio.run(_run_job_workflow(job_id=job_id, credentials=credentials))
+    asyncio.run(_run_job_workflow(job_id=job_id, credentials=credentials, auto_submit=False))
+    return {"job_id": job_id, "task_id": self.request.id}
+
+
+@celery_app.task(name="apps.worker.tasks.submit_job", bind=True)
+def submit_job(self, job_id: str, credentials: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Celery background worker task for explicit SRM submission."""
+    logger.info("Worker submitting job %s (task_id=%s)", job_id, self.request.id)
+    if sys.platform == "win32":
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        except Exception:
+            pass
+    asyncio.run(_run_submission_workflow(job_id=job_id, credentials=credentials))
     return {"job_id": job_id, "task_id": self.request.id}

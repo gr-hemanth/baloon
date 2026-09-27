@@ -325,7 +325,19 @@ def test_complete_user_flow_discovery_to_completed_job(client: TestClient, db_se
         )
         assert solve_resp.status_code == 200
 
-        # 4. Job resumes in eager mode and completes
+        # 4. Job resumes in eager mode and reaches AWAITING_USER_REVIEW
+        poll_review = client.get(f"/api/v1/jobs/{job_id}")
+        assert poll_review.status_code == 200
+        review_data = poll_review.json()
+        assert review_data["status"] == "AWAITING_USER_REVIEW"
+        assert review_data["result"] is not None
+        assert "drive_web_url" in review_data["result"]
+
+        # 4b. User clicks submit to SRM
+        submit_resp = client.post(f"/api/v1/jobs/{job_id}/submit", json={})
+        assert submit_resp.status_code == 200
+
+        # 5. Job completes verification
         poll_final = client.get(f"/api/v1/jobs/{job_id}")
         assert poll_final.status_code == 200
         final_data = poll_final.json()
@@ -335,7 +347,7 @@ def test_complete_user_flow_discovery_to_completed_job(client: TestClient, db_se
         assert "drive_web_url" in final_data["result"]
         assert "https://docs.google.com" in final_data["result"]["drive_web_url"]
 
-        # 5. Zero-Persistence Guarantee: Check database record directly
+        # 6. Zero-Persistence Guarantee: Check database record directly
         verify_db = TestingSessionLocal()
         try:
             db_job = verify_db.query(Job).filter(Job.id == job_id).first()

@@ -163,6 +163,7 @@ async def test_slo2_selection_workflow_end_to_end(db_session: Session):
             db_session=db,
             orchestrator=mock_orch,
             drive_client=mock_drive,
+            auto_submit=True,
         )
 
     db.refresh(job)
@@ -227,6 +228,7 @@ async def test_slo1_selection_workflow_end_to_end(db_session: Session):
             db_session=db,
             orchestrator=mock_orch,
             drive_client=mock_drive,
+            auto_submit=True,
         )
 
     db.refresh(job)
@@ -283,6 +285,7 @@ async def test_worksheet_id_parsing_formats_for_slo2(db_session: Session, ws_id_
             db_session=db,
             orchestrator=mock_orch,
             drive_client=mock_drive,
+            auto_submit=True,
         )
 
     db.refresh(job)
@@ -335,6 +338,7 @@ async def test_slo2_idempotency_does_not_falsely_skip_when_slo1_is_verified(db_s
             db_session=db,
             orchestrator=mock_orch,
             drive_client=mock_drive,
+            auto_submit=True,
         )
 
     db.refresh(job)

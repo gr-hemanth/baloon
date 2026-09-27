@@ -14,6 +14,7 @@ def test_job_status_enum_completeness():
         "DOWNLOADING",
         "PROCESSING",
         "UPLOADING",
+        "AWAITING_USER_REVIEW",
         "SUBMITTING",
         "VERIFYING",
         "COMPLETED",

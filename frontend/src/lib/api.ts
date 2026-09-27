@@ -46,6 +46,7 @@ export interface JobResponse {
   status: string;
   course_id?: string;
   semester_id?: string;
+  subject_id?: string;
   worksheet_id?: string;
   transport_mode: string;
   current_step?: string;
@@ -53,21 +54,42 @@ export interface JobResponse {
   result?: {
     course_code?: string;
     course_name?: string;
+    semester?: number;
     session?: number;
     slo?: number;
+    batch_id?: string;
     original_file?: string;
+    original_file_path?: string;
     completed_file?: string;
+    completed_file_path?: string;
     drive_file_id?: string;
     drive_web_url?: string;
     drive_permission_status?: string;
+    drive_verified?: boolean;
+    review_ready?: boolean;
+    submission_allowed?: boolean;
     verification_status?: string;
     practice_status?: number;
     questions_count?: number;
     answers_count?: number;
+    transport_used?: string;
+    review_ready_at?: string;
+    submission_started_at?: string;
+    submission_verified_at?: string;
   };
   error_message?: string;
   created_at: string;
   updated_at: string;
+  review_ready?: boolean;
+  completed_file_name?: string;
+  drive_file_id?: string;
+  drive_web_view_link?: string;
+  drive_verified?: boolean;
+  submission_allowed?: boolean;
+  questions_count?: number;
+  answers_count?: number;
+  submission_started_at?: string;
+  submission_verified_at?: string;
 }
 
 export async function checkDriveStatus(): Promise<GoogleDriveStatus> {
@@ -211,4 +233,139 @@ export async function submitCaptchaSolution(
   });
   if (!res.ok) throw new Error("Failed to submit CAPTCHA solution");
   return res.json();
+}
+
+export async function listJobs(limit: number = 5): Promise<JobResponse[]> {
+  const res = await fetch(`${API_BASE}/jobs?limit=${limit}`);
+  if (!res.ok) throw new Error("Failed to list jobs");
+  return res.json();
+}
+
+export async function submitJobToSrm(
+  jobId: string,
+  credentials?: Record<string, any>
+): Promise<JobResponse> {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}/submit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ credentials }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || "Failed to submit job to SRM");
+  }
+  return res.json();
+}
+
+export async function cancelJob(jobId: string): Promise<JobResponse> {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}/cancel`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to cancel job");
+  return res.json();
+}
+
+export function getJobDownloadUrl(jobId: string): string {
+  return `${API_BASE}/jobs/${jobId}/download`;
+}
+
+export interface StatusUIInfo {
+  label: string;
+  description: string;
+  badgeClass: string;
+  dotClass: string;
+  textClass: string;
+}
+
+export const STATUS_UI_MAP: Record<string, StatusUIInfo> = {
+  PENDING: {
+    label: "Queued",
+    description: "Job received and enqueued in broker",
+    badgeClass: "bg-slate-800 text-slate-300 border-slate-700",
+    dotClass: "bg-slate-700 border-slate-500",
+    textClass: "text-slate-400",
+  },
+  RUNNING: {
+    label: "Processing",
+    description: "Worker initialized, connecting to SRM portal",
+    badgeClass: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    dotClass: "bg-blue-500 border-white pulse-dot",
+    textClass: "text-blue-300 font-semibold",
+  },
+  WAITING_FOR_CAPTCHA: {
+    label: "CAPTCHA required",
+    description: "Paused: Portal presented a CAPTCHA challenge",
+    badgeClass: "bg-amber-500/10 text-amber-400 border-amber-500/20 pulse-dot",
+    dotClass: "bg-amber-500 border-amber-300 pulse-dot",
+    textClass: "text-amber-300 font-semibold",
+  },
+  DOWNLOADING: {
+    label: "Downloading worksheet",
+    description: "Downloading original worksheet document",
+    badgeClass: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    dotClass: "bg-blue-500 border-white pulse-dot",
+    textClass: "text-blue-300 font-semibold",
+  },
+  PROCESSING: {
+    label: "Generating/filling answers",
+    description: "Parsing questions and generating verified answers",
+    badgeClass: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    dotClass: "bg-blue-500 border-white pulse-dot",
+    textClass: "text-blue-300 font-semibold",
+  },
+  UPLOADING: {
+    label: "Uploading to Drive",
+    description: "Storing completed worksheet in Google Drive",
+    badgeClass: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    dotClass: "bg-blue-500 border-white pulse-dot",
+    textClass: "text-blue-300 font-semibold",
+  },
+  AWAITING_USER_REVIEW: {
+    label: "Waiting for your review/approval",
+    description: "Your completed worksheet is ready for review.",
+    badgeClass: "bg-amber-500/10 text-amber-400 border-amber-500/20 pulse-dot",
+    dotClass: "bg-amber-500 border-amber-300 pulse-dot",
+    textClass: "text-amber-300 font-semibold",
+  },
+  SUBMITTING: {
+    label: "Submitting to SRM",
+    description: "Submitting verified link to SRM portal",
+    badgeClass: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    dotClass: "bg-blue-500 border-white pulse-dot",
+    textClass: "text-blue-300 font-semibold",
+  },
+  VERIFYING: {
+    label: "Verifying submission",
+    description: "Confirming portal practice status update",
+    badgeClass: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    dotClass: "bg-blue-500 border-white pulse-dot",
+    textClass: "text-blue-300 font-semibold",
+  },
+  COMPLETED: {
+    label: "Completed",
+    description: "Successfully finished and verified on portal",
+    badgeClass: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+    dotClass: "bg-emerald-500 border-emerald-400",
+    textClass: "text-emerald-400 font-semibold",
+  },
+  FAILED: {
+    label: "Failed",
+    description: "Job failed or was cancelled",
+    badgeClass: "bg-red-500/10 text-red-400 border-red-500/20",
+    dotClass: "bg-red-600 border-red-400",
+    textClass: "text-red-400 font-semibold",
+  },
+};
+
+export function getStatusUI(status?: string): StatusUIInfo {
+  if (status && STATUS_UI_MAP[status]) {
+    return STATUS_UI_MAP[status];
+  }
+  return {
+    label: status ? status.replace(/_/g, " ") : "Unknown",
+    description: status ? `State: ${status}` : "Status unavailable",
+    badgeClass: "bg-slate-800 text-slate-400 border-slate-700",
+    dotClass: "bg-slate-700 border-slate-600",
+    textClass: "text-slate-400",
+  };
 }

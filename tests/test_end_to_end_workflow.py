@@ -163,6 +163,7 @@ async def test_full_end_to_end_workflow_success(db_session: Session, tmp_path: P
         orchestrator=mock_orch,
         drive_client=mock_drive,
         db_session=db_session,
+        auto_submit=True,
     )
 
     db_session.refresh(job)
@@ -263,6 +264,7 @@ async def test_captcha_pause_and_resume_flow(db_session: Session, tmp_path: Path
         orchestrator=mock_orch,
         drive_client=mock_drive,
         db_session=db_session,
+        auto_submit=True,
     )
 
     db_session.refresh(job)
@@ -315,6 +317,7 @@ async def test_idempotent_drive_upload_and_submission(db_session: Session, tmp_p
         orchestrator=mock_orch,
         drive_client=mock_drive,
         db_session=db_session,
+        auto_submit=True,
     )
 
     db_session.refresh(job)
@@ -425,6 +428,7 @@ async def test_srm_verification_failure_never_marks_completed(db_session: Sessio
         orchestrator=mock_orch,
         drive_client=mock_drive,
         db_session=db_session,
+        auto_submit=True,
     )
 
     db_session.refresh(job)
@@ -527,6 +531,20 @@ def test_celery_task_dispatch_eager(db_session: Session, tmp_path: Path):
         res = process_job.apply(args=[job_id, {"USER_ID": "RA2111003010001"}])
         assert res.successful()
 
+        # Verify job reached AWAITING_USER_REVIEW
+        interim_session = TestingSessionLocal()
+        try:
+            interim_job = interim_session.query(Job).filter(Job.id == job_id).first()
+            assert interim_job is not None
+            assert interim_job.status == JobStatus.AWAITING_USER_REVIEW
+        finally:
+            interim_session.close()
+
+        # Execute submit_job task to complete the submission
+        from apps.worker.tasks import submit_job
+        sub_res = submit_job.apply(args=[job_id])
+        assert sub_res.successful()
+
     verify_session = TestingSessionLocal()
     try:
         refreshed_job = verify_session.query(Job).filter(Job.id == job_id).first()
@@ -605,6 +623,7 @@ async def test_full_workflow_with_freellm_and_drive_and_srm(db_session: Session,
         drive_client=mock_drive,
         pipeline=pipeline,
         db_session=db_session,
+        auto_submit=True,
     )
 
     db_session.refresh(job)
@@ -683,6 +702,7 @@ async def test_srm_submission_failure_transitions_to_failed(db_session: Session,
         orchestrator=mock_orch,
         drive_client=mock_drive,
         db_session=db_session,
+        auto_submit=True,
     )
 
     db_session.refresh(job)
@@ -734,7 +754,16 @@ def test_api_captcha_submission_resumes_background_task(client: TestClient, tmp_
         )
         assert captcha_resp.status_code == 200
 
-        # 4. In eager mode, the job has run to completion
+        # 4. Job resumed in eager mode and reached AWAITING_USER_REVIEW
+        review_resp = client.get(f"/api/v1/jobs/{job_id}")
+        assert review_resp.status_code == 200
+        assert review_resp.json()["status"] == "AWAITING_USER_REVIEW"
+
+        # 5. User submits to SRM via API submit endpoint
+        submit_resp = client.post(f"/api/v1/jobs/{job_id}/submit", json={})
+        assert submit_resp.status_code == 200
+
+        # 6. Job completes verification
         final_resp = client.get(f"/api/v1/jobs/{job_id}")
         assert final_resp.status_code == 200
         assert final_resp.json()["status"] == "COMPLETED"

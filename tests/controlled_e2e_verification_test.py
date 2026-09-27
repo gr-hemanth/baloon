@@ -219,6 +219,7 @@ async def test_controlled_live_e2e_verification():
             drive_client=mock_drive,
             pipeline=mock_pipeline,
             db_session=db,
+            auto_submit=True,
         )
 
         db.refresh(job)

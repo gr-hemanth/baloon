@@ -1,13 +1,21 @@
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from packages.shared.database import get_db
 from packages.shared.models.job import Job, JobStatus
-from packages.shared.schemas.job import JobCreate, JobResponse, CaptchaSubmit
-from apps.worker.tasks import process_job, get_job_credentials, store_job_credentials, clear_job_credentials
+from packages.shared.schemas.job import JobCreate, JobResponse, CaptchaSubmit, JobSubmitRequest
+from apps.worker.tasks import (
+    process_job,
+    submit_job,
+    get_job_credentials,
+    store_job_credentials,
+    clear_job_credentials,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +34,7 @@ def create_job(job_in: JobCreate, db: Session = Depends(get_db)):
             JobStatus.DOWNLOADING,
             JobStatus.PROCESSING,
             JobStatus.UPLOADING,
+            JobStatus.AWAITING_USER_REVIEW,
             JobStatus.SUBMITTING,
             JobStatus.VERIFYING,
         ]
@@ -238,3 +247,120 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)):
     clear_job_credentials(job_id)
     logger.info("Job %s cancelled by user request", job_id)
     return job
+
+
+@router.post("/{job_id}/submit", response_model=JobResponse)
+def submit_job_to_srm(
+    job_id: str,
+    submit_in: Optional[JobSubmitRequest] = None,
+    db: Session = Depends(get_db),
+):
+    """Explicitly submit the reviewed worksheet link to the SRM portal."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job '{job_id}' not found",
+        )
+
+    # Check for duplicate / already active submission (Idempotency)
+    if job.status in (JobStatus.SUBMITTING, JobStatus.VERIFYING):
+        logger.info("Job %s is already submitting or verifying (status: %s)", job_id, job.status.value)
+        return job
+
+    if job.status == JobStatus.COMPLETED:
+        logger.info("Job %s is already COMPLETED", job_id)
+        return job
+
+    # Only allow submission from AWAITING_USER_REVIEW or retryable FAILED state
+    is_retryable_failed = bool(job.status == JobStatus.FAILED and job.result and job.result.get("drive_web_url"))
+    if job.status != JobStatus.AWAITING_USER_REVIEW and not is_retryable_failed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Job cannot be submitted from status '{job.status.value}'. Must be AWAITING_USER_REVIEW.",
+        )
+
+    # Validate Drive verification
+    res = dict(job.result or {})
+    drive_url = res.get("drive_web_url")
+    drive_file_id = res.get("drive_file_id")
+    if not drive_url or not drive_file_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot submit to SRM: Google Drive link is missing or unverified.",
+        )
+
+    # Resolve ephemeral credentials
+    req_creds = submit_in.credentials if submit_in else None
+    cached_creds = get_job_credentials(job_id) or {}
+    if req_creds:
+        cached_creds.update(req_creds)
+        store_job_credentials(job_id, cached_creds)
+
+    # Transition state to SUBMITTING
+    job.status = JobStatus.SUBMITTING
+    job.current_step = "submitting_link_to_srm"
+    job.error_message = None
+    res["submission_started_at"] = datetime.now(timezone.utc).isoformat()
+    job.result = res
+    job.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(job)
+
+    # Dispatch Celery submit_job task
+    try:
+        submit_job.delay(job_id=job.id, credentials=cached_creds)
+        logger.info("Job %s submission dispatched to Celery worker", job.id)
+    except Exception as exc:
+        logger.warning(
+            "Could not dispatch submission to Celery broker: %s. Executing via local fallback.",
+            exc,
+        )
+        try:
+            logger.info("Executing submission for job %s eagerly via local fallback", job.id)
+            submit_job.apply(args=[job.id], kwargs={"credentials": cached_creds})
+        except Exception as fallback_exc:
+            logger.error("Local fallback submission failed for job %s: %s", job.id, fallback_exc)
+
+    db.expire_all()
+    db.refresh(job)
+    return job
+
+
+@router.get("/{job_id}/download")
+def download_completed_worksheet(job_id: str, db: Session = Depends(get_db)):
+    """Safely download the completed worksheet document without exposing server filesystem paths."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job '{job_id}' not found",
+        )
+
+    res = job.result or {}
+    file_path_str = res.get("completed_file_path")
+    if not file_path_str:
+        comp_file_name = res.get("completed_file")
+        if not comp_file_name:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Completed worksheet document is not available for download yet",
+            )
+        file_path_str = comp_file_name
+
+    file_path = Path(file_path_str)
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Completed worksheet file not found on disk",
+        )
+
+    download_filename = res.get("completed_file") or file_path.name
+    if not download_filename.lower().endswith(".docx"):
+        download_filename = f"{download_filename}.docx"
+
+    return FileResponse(
+        path=str(file_path.resolve()),
+        filename=download_filename,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )

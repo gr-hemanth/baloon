@@ -240,24 +240,31 @@
               <div class="text-[11px] text-slate-500">Storing completed copy in Google Drive with 'Anyone with link / Viewer' permissions</div>
             </div>
 
-            <!-- 7. SUBMITTING -->
+            <!-- 7. AWAITING_USER_REVIEW -->
+            <div class="step-item relative" data-step="AWAITING_USER_REVIEW">
+              <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
+              <div class="font-semibold text-xs text-slate-400 step-title">7. AWAITING_USER_REVIEW</div>
+              <div class="text-[11px] text-slate-400 font-medium">Your completed worksheet is ready. Review it before submitting to SRM.</div>
+            </div>
+
+            <!-- 8. SUBMITTING -->
             <div class="step-item relative" data-step="SUBMITTING">
               <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
-              <div class="font-semibold text-xs text-slate-400 step-title">7. SUBMITTING</div>
+              <div class="font-semibold text-xs text-slate-400 step-title">8. SUBMITTING</div>
               <div class="text-[11px] text-slate-500">Submitting verified public link to SRM portal via direct HTTP POST</div>
             </div>
 
-            <!-- 8. VERIFYING -->
+            <!-- 9. VERIFYING -->
             <div class="step-item relative" data-step="VERIFYING">
               <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
-              <div class="font-semibold text-xs text-slate-400 step-title">8. VERIFYING</div>
+              <div class="font-semibold text-xs text-slate-400 step-title">9. VERIFYING</div>
               <div class="text-[11px] text-slate-500">Confirming practice status update on portal before marking complete</div>
             </div>
 
-            <!-- 9. COMPLETED -->
+            <!-- 10. COMPLETED -->
             <div class="step-item relative" data-step="COMPLETED">
               <div class="step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700 transition"></div>
-              <div class="font-semibold text-xs text-slate-400 step-title">9. COMPLETED</div>
+              <div class="font-semibold text-xs text-slate-400 step-title">10. COMPLETED</div>
               <div class="text-[11px] text-slate-500">Workflow finished successfully; deliverables ready</div>
             </div>
           </div>
@@ -268,6 +275,71 @@
             <div>
               <strong class="text-red-100">Job Error:</strong>
               <div id="error-alert-msg" class="mt-1 font-mono break-all"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card: Final Worksheet Ready for Review (Awaiting User Review) -->
+        <div id="review-card" class="bg-slate-950 border border-amber-500/40 rounded-xl p-5 shadow-xl hidden">
+          <div class="flex items-center justify-between pb-3 mb-4 border-b border-slate-800">
+            <div>
+              <h2 class="text-sm font-semibold uppercase tracking-wider text-amber-400 flex items-center gap-2">
+                <i class="fa-solid fa-file-circle-check"></i> FINAL WORKSHEET READY
+              </h2>
+              <p class="text-xs text-slate-300 mt-1">Your worksheet has been generated and uploaded to Google Drive.</p>
+              <p class="text-xs text-slate-400 mt-0.5">Review the document before submitting it to SRM.</p>
+            </div>
+            <span class="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 font-bold pulse-dot">Waiting for your approval</span>
+          </div>
+
+          <div class="space-y-4 text-xs">
+            <div class="grid grid-cols-2 gap-3 p-3 rounded-lg bg-slate-900/80 border border-slate-800">
+              <div>
+                <span class="text-slate-400 block text-[11px] mb-0.5">Worksheet:</span>
+                <span id="review-ws-title" class="text-white font-medium text-xs">--</span>
+              </div>
+              <div>
+                <span class="text-slate-400 block text-[11px] mb-0.5">Questions Answered:</span>
+                <span id="review-q-count" class="text-emerald-400 font-medium text-xs">--</span>
+              </div>
+            </div>
+
+            <div class="p-4 rounded-lg bg-slate-900 border border-slate-800 space-y-3">
+              <div class="flex items-center justify-between">
+                <span class="text-slate-300 font-medium">Google Drive Document:</span>
+                <span id="review-drive-badge" class="px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-300 font-mono text-[10px] border border-emerald-800/60">VERIFIED_PUBLIC_READER</span>
+              </div>
+
+              <div>
+                <label class="block text-[11px] text-slate-400 mb-1">Drive Link:</label>
+                <input type="text" id="review-drive-link" readonly
+                  class="w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-slate-200 font-mono text-xs select-all" />
+              </div>
+
+              <div class="flex flex-wrap gap-2 pt-1">
+                <a id="review-view-doc-btn" href="#" target="_blank" rel="noopener noreferrer"
+                  class="py-2 px-3.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center gap-2 transition shadow-md shadow-blue-600/20">
+                  <i class="fa-solid fa-arrow-up-right-from-square text-xs"></i>
+                  <span>View Final Document</span>
+                </a>
+                <a id="review-download-btn" href="#" download
+                  class="py-2 px-3.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 hover:text-white font-medium flex items-center gap-2 transition">
+                  <i class="fa-solid fa-download text-xs"></i>
+                  <span>Download Completed Worksheet</span>
+                </a>
+              </div>
+            </div>
+
+            <div class="pt-2">
+              <button type="button" id="review-submit-srm-btn" onclick="openSubmitConfirmationModal()"
+                class="w-full py-3 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 transition disabled:opacity-50 disabled:cursor-not-allowed">
+                <i class="fa-solid fa-paper-plane"></i>
+                <span>Submit to SRM</span>
+              </button>
+              <div class="flex items-center justify-between text-[11px] text-slate-400 mt-2 px-1">
+                <span>Status: <strong class="text-amber-300">Waiting for your approval</strong></span>
+                <span class="text-slate-500">"Submit to SRM" will not occur automatically. Inspect the document above, then click to confirm submission.</span>
+              </div>
             </div>
           </div>
         </div>
@@ -370,6 +442,30 @@
           </button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Submit Confirmation Modal -->
+  <div id="submit-confirm-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+    <div class="bg-slate-950 border border-slate-700 rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4">
+      <div class="flex items-center gap-3 text-amber-400">
+        <i class="fa-solid fa-triangle-exclamation text-xl"></i>
+        <h3 class="font-bold text-base text-white">Confirm SRM Submission</h3>
+      </div>
+      <p class="text-xs text-slate-300 leading-relaxed" id="submit-confirm-modal-text">
+        Your completed worksheet is ready and has been uploaded to Google Drive. Review it before submitting to SRM.
+      </p>
+      <div class="flex justify-end gap-3 pt-2">
+        <button type="button" id="cancel-submit-btn" onclick="closeSubmitConfirmationModal()"
+          class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition">
+          Cancel
+        </button>
+        <button type="button" id="confirm-submit-btn" onclick="confirmAndSubmitToSRM()"
+          class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition">
+          <i class="fa-solid fa-paper-plane text-xs"></i>
+          <span>Submit to SRM</span>
+        </button>
+      </div>
     </div>
   </div>
 
@@ -740,20 +836,52 @@
           }
         }
 
-        if (job.status === "COMPLETED") {
+        if (job.status === "AWAITING_USER_REVIEW") {
+          hideCaptchaModal();
+          document.getElementById("error-alert").classList.add("hidden");
+          document.getElementById("deliverables-card").classList.add("hidden");
+          showReviewCard(job);
+        } else if (job.status === "SUBMITTING" || job.status === "VERIFYING") {
+          hideCaptchaModal();
+          document.getElementById("review-card").classList.add("hidden");
+          document.getElementById("error-alert").classList.add("hidden");
+          document.getElementById("deliverables-card").classList.add("hidden");
+        } else if (job.status === "COMPLETED") {
           clearInterval(pollInterval);
           hideCaptchaModal();
+          document.getElementById("review-card").classList.add("hidden");
           try { localStorage.removeItem("srm_active_job_id"); } catch (e) {}
           showDeliverables(job.result);
         } else if (job.status === "FAILED") {
           clearInterval(pollInterval);
           hideCaptchaModal();
-          try { localStorage.removeItem("srm_active_job_id"); } catch (e) {}
+          if (job.drive_web_view_link || (job.result && job.result.drive_web_url)) {
+            showReviewCard(job);
+          }
           showErrorAlert(job.error_message);
         }
       } catch (err) {
         console.warn("Poll failed:", err);
       }
+    }
+
+    const STATUS_UI_MAP = {
+      PENDING: { label: "Queued", description: "Job received and enqueued in Celery broker" },
+      RUNNING: { label: "Processing", description: "Worker initialized, authenticating with portal" },
+      WAITING_FOR_CAPTCHA: { label: "CAPTCHA required", description: "Paused: Portal presented a CAPTCHA challenge" },
+      DOWNLOADING: { label: "Downloading worksheet", description: "Fetching original worksheet document to isolated directory" },
+      PROCESSING: { label: "Generating/filling answers", description: "Parsing questions, generating answers via NVIDIA (FreeLLM fallback)" },
+      UPLOADING: { label: "Uploading to Drive", description: "Storing completed copy in Google Drive" },
+      AWAITING_USER_REVIEW: { label: "Waiting for your review/approval", description: "Your completed worksheet is ready for review." },
+      SUBMITTING: { label: "Submitting to SRM", description: "Submitting verified public link to SRM portal via direct HTTP POST" },
+      VERIFYING: { label: "Verifying submission", description: "Confirming practice status update on portal before marking complete" },
+      COMPLETED: { label: "Completed", description: "Workflow finished successfully; deliverables ready" },
+      FAILED: { label: "Failed", description: "Job failed or was cancelled" }
+    };
+
+    function getStatusLabel(status) {
+      if (status && STATUS_UI_MAP[status]) return STATUS_UI_MAP[status].label;
+      return status ? status.replace(/_/g, " ") : "Unknown";
     }
 
     const STATE_ORDER = [
@@ -763,6 +891,7 @@
       "DOWNLOADING",
       "PROCESSING",
       "UPLOADING",
+      "AWAITING_USER_REVIEW",
       "SUBMITTING",
       "VERIFYING",
       "COMPLETED"
@@ -770,8 +899,15 @@
 
     function updateStepperUI(currentStatus, currentStep) {
       const pill = document.getElementById("job-status-pill");
-      pill.textContent = currentStatus;
-      document.getElementById("meta-job-step").textContent = currentStep || currentStatus;
+      pill.textContent = getStatusLabel(currentStatus);
+
+      let stepText = currentStep;
+      if (currentStatus === "AWAITING_USER_REVIEW") {
+        stepText = "Waiting for your review/approval";
+      } else if (!stepText) {
+        stepText = getStatusLabel(currentStatus);
+      }
+      document.getElementById("meta-job-step").textContent = stepText;
 
       // Status pill coloring
       if (currentStatus === "COMPLETED") {
@@ -779,6 +915,8 @@
       } else if (currentStatus === "FAILED") {
         pill.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-red-500/10 text-red-400 border border-red-500/20";
       } else if (currentStatus === "WAITING_FOR_CAPTCHA") {
+        pill.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-amber-500/10 text-amber-400 border border-amber-500/20 pulse-dot";
+      } else if (currentStatus === "AWAITING_USER_REVIEW") {
         pill.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-amber-500/10 text-amber-400 border border-amber-500/20 pulse-dot";
       } else {
         pill.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-blue-500/10 text-blue-400 border border-blue-500/20";
@@ -803,8 +941,13 @@
           title.className = "font-semibold text-xs text-emerald-400 step-title";
         } else if (idx === activeIdx) {
           // Active step
-          dot.className = "step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-blue-500 border-2 border-white pulse-dot";
-          title.className = "font-semibold text-xs text-blue-300 step-title";
+          if (currentStatus === "AWAITING_USER_REVIEW") {
+            dot.className = "step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-amber-500 border-2 border-amber-300 pulse-dot";
+            title.className = "font-semibold text-xs text-amber-300 step-title";
+          } else {
+            dot.className = "step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-blue-500 border-2 border-white pulse-dot";
+            title.className = "font-semibold text-xs text-blue-300 step-title";
+          }
         } else {
           // Future step
           dot.className = "step-dot absolute -left-[31px] top-0.5 h-4 w-4 rounded-full bg-slate-800 border-2 border-slate-700";
@@ -828,6 +971,99 @@
       hideCaptchaModal();
       document.getElementById("error-alert-msg").textContent = msg || "An unexpected error occurred during execution.";
       document.getElementById("error-alert").classList.remove("hidden");
+    }
+
+    function showReviewCard(job) {
+      const card = document.getElementById("review-card");
+      if (!card) return;
+      card.classList.remove("hidden");
+
+      const res = job.result || {};
+      const course = res.course_code || job.course_id || "Course";
+      const sess = res.session || "";
+      const slo = res.slo || "";
+      const wsTitle = `${course} – Session ${sess} – SLO ${slo}`;
+      document.getElementById("review-ws-title").textContent = wsTitle;
+
+      const qAns = res.answers_count ?? res.questions_count ?? "--";
+      const qTot = res.questions_count ?? "--";
+      document.getElementById("review-q-count").textContent = `${qAns} / ${qTot}`;
+
+      const driveUrl = job.drive_web_view_link || res.drive_web_url || "";
+      document.getElementById("review-drive-link").value = driveUrl;
+
+      const viewDocBtn = document.getElementById("review-view-doc-btn");
+      if (driveUrl) {
+        viewDocBtn.href = driveUrl;
+        viewDocBtn.classList.remove("opacity-50", "pointer-events-none");
+      } else {
+        viewDocBtn.href = "#";
+        viewDocBtn.classList.add("opacity-50", "pointer-events-none");
+      }
+
+      const downloadBtn = document.getElementById("review-download-btn");
+      downloadBtn.href = `/api/v1/jobs/${job.id}/download`;
+
+      const submitBtn = document.getElementById("review-submit-srm-btn");
+      const isAllowed = job.submission_allowed !== undefined ? job.submission_allowed : Boolean(driveUrl);
+      submitBtn.disabled = !isAllowed;
+    }
+
+    let isSubmittingToSRM = false;
+
+    function openSubmitConfirmationModal() {
+      if (isSubmittingToSRM) return;
+      const modal = document.getElementById("submit-confirm-modal");
+      if (modal) modal.classList.remove("hidden");
+    }
+
+    function closeSubmitConfirmationModal() {
+      const modal = document.getElementById("submit-confirm-modal");
+      if (modal) modal.classList.add("hidden");
+    }
+
+    async function confirmAndSubmitToSRM() {
+      if (!activeJobId || isSubmittingToSRM) return;
+      isSubmittingToSRM = true;
+      const btn = document.getElementById("confirm-submit-btn");
+      const reviewSubmitBtn = document.getElementById("review-submit-srm-btn");
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin text-xs"></i> <span>Submitting...</span>`;
+      }
+      if (reviewSubmitBtn) {
+        reviewSubmitBtn.disabled = true;
+        reviewSubmitBtn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> <span>Submitting to SRM...</span>`;
+      }
+
+      try {
+        const res = await fetch(`/api/v1/jobs/${activeJobId}/submit`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.detail || "Submission request failed");
+        }
+
+        closeSubmitConfirmationModal();
+        await pollJobStatus(activeJobId);
+      } catch (err) {
+        alert("Submission failed: " + err.message);
+      } finally {
+        isSubmittingToSRM = false;
+        closeSubmitConfirmationModal();
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = `<i class="fa-solid fa-paper-plane text-xs"></i> <span>Submit to SRM</span>`;
+        }
+        if (reviewSubmitBtn) {
+          reviewSubmitBtn.disabled = false;
+          reviewSubmitBtn.innerHTML = `<i class="fa-solid fa-paper-plane"></i> <span>Submit to SRM</span>`;
+        }
+      }
     }
 
     // CAPTCHA Modal
@@ -985,6 +1221,7 @@
       pill.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-slate-800 text-slate-400";
       document.getElementById("dismiss-job-btn").classList.add("hidden");
       document.getElementById("error-alert").classList.add("hidden");
+      document.getElementById("review-card").classList.add("hidden");
       document.getElementById("deliverables-card").classList.add("hidden");
       document.querySelectorAll(".step-item").forEach(el => {
         const dot = el.querySelector(".step-dot");
@@ -998,8 +1235,10 @@
     function isGenuinelyActive(job) {
       if (!job || !job.status) return false;
       const ageMs = job.created_at ? (Date.now() - new Date(job.created_at).getTime()) : Infinity;
+      if (job.status === "AWAITING_USER_REVIEW") return true; // Review state persists until explicit user submission
+      if (job.status === "SUBMITTING" || job.status === "VERIFYING") return ageMs < 600000;
       if (ageMs > 900000) return false; // Ignore jobs older than 15 minutes
-      if (job.status === "WAITING_FOR_CAPTCHA" || job.status === "RUNNING") return true;
+      if (job.status === "WAITING_FOR_CAPTCHA" || job.status === "RUNNING" || job.status === "DOWNLOADING" || job.status === "PROCESSING" || job.status === "UPLOADING") return true;
       if (job.status === "PENDING") return ageMs < 180000;
       return false;
     }
