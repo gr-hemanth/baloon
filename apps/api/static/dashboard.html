@@ -816,7 +816,8 @@
       discoveredCourses.forEach(c => {
         const opt = document.createElement("option");
         opt.value = c.course_code;
-        opt.textContent = `${c.course_code} - ${c.course_name} (${c.worksheets.length} worksheets)`;
+        const availCount = (c.worksheets || []).filter(w => w.is_available).length;
+        opt.textContent = `${c.course_code} - ${c.course_name} (${availCount > 0 ? `${availCount} available` : '0 available / Unavailable'})`;
         dropdown.appendChild(opt);
       });
 
@@ -833,12 +834,43 @@
       selectedWorksheetData = null;
       document.getElementById("start-job-btn").disabled = true;
 
-      if (!course || !course.worksheets || course.worksheets.length === 0) {
-        container.innerHTML = `<p class="text-xs text-slate-500 italic">No available DOCX worksheets found for this course.</p>`;
+      if (!course) {
+        container.innerHTML = `<p class="text-xs text-slate-500 italic">Select a course to view available worksheets.</p>`;
         return;
       }
 
-      course.worksheets.forEach((ws, idx) => {
+      const allWs = course.worksheets || [];
+      const availableWs = allWs.filter(w => w.is_available);
+      const unavailableWs = allWs.filter(w => !w.is_available);
+
+      if (availableWs.length === 0) {
+        const sampleWs = unavailableWs[0] || { session: "N/A", slo: "N/A", worksheet_id: "N/A" };
+        container.innerHTML = `
+          <div class="p-3.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 space-y-2.5">
+            <div class="flex items-center gap-2 text-amber-400 font-semibold text-xs">
+              <i class="fa-solid fa-triangle-exclamation text-sm"></i>
+              <span>No official SRM worksheet is available for this course/session.</span>
+            </div>
+            <p class="text-[11px] text-slate-300">
+              The course coordinator has not uploaded official worksheets to the SRM portal for <strong class="text-white">${course.course_code}</strong>.
+            </p>
+            <div class="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5 space-y-1.5 font-mono text-[11px]">
+              <div class="flex justify-between"><span class="text-slate-400">Course:</span> <span class="text-white font-bold">${course.course_code}</span></div>
+              <div class="flex justify-between"><span class="text-slate-400">Session:</span> <span class="text-white font-bold">${sampleWs.session}</span></div>
+              <div class="flex justify-between"><span class="text-slate-400">SLO:</span> <span class="text-white font-bold">${sampleWs.slo}</span></div>
+              <div class="flex justify-between"><span class="text-slate-400">Worksheet ID:</span> <span class="text-white font-bold">${sampleWs.worksheet_id || `${sampleWs.session}${sampleWs.slo}`}</span></div>
+              <div class="flex justify-between"><span class="text-slate-400">Availability:</span> <span class="text-rose-400 font-bold uppercase">UNAVAILABLE</span></div>
+            </div>
+            <p class="text-[10px] text-slate-400 italic">
+              Worksheets unavailable on SRM cannot be automated. Synthetic questions are never fabricated.
+            </p>
+          </div>
+        `;
+        return;
+      }
+
+      // Render only available worksheets in the main list
+      availableWs.forEach((ws, idx) => {
         const div = document.createElement("div");
         div.className = "flex items-center justify-between p-2.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-slate-700 transition cursor-pointer text-xs";
         
@@ -864,10 +896,28 @@
 
         container.appendChild(div);
       });
+
+      // If there are also unavailable worksheets in this course, show an informative muted section
+      if (unavailableWs.length > 0) {
+        const unDiv = document.createElement("div");
+        unDiv.className = "mt-3 pt-3 border-t border-slate-800 text-[11px] text-slate-500";
+        unDiv.innerHTML = `
+          <div class="text-[11px] font-medium text-slate-400 mb-1.5 flex items-center gap-1.5">
+            <i class="fa-solid fa-ban text-rose-400 text-xs"></i>
+            <span>Unavailable on SRM (${unavailableWs.length} not uploaded by coordinator)</span>
+          </div>
+          <p class="text-[10px] text-slate-500 italic mb-2">These worksheets are not available on the portal and cannot be automated.</p>
+        `;
+        container.appendChild(unDiv);
+      }
     }
 
     // Step 2: Start Job
     async function startAutomationJob() {
+      if (!selectedWorksheetData || !selectedWorksheetData.is_available) {
+        alert("Cannot start job: No official SRM worksheet is available for this course/session.");
+        return;
+      }
       const userId = document.getElementById("srm-userid").value.trim();
       const password = document.getElementById("srm-password").value;
       const semester = document.getElementById("srm-semester").value;

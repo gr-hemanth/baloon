@@ -225,7 +225,7 @@ export default function DashboardPage() {
 
   // Start Automation Job
   const handleStartJob = async () => {
-    if (!selectedCourseCode || !selectedWorksheet) return;
+    if (!selectedCourseCode || !selectedWorksheet || !selectedWorksheet.is_available) return;
     setIsStartingJob(true);
     setJobError(null);
     try {
@@ -635,67 +635,113 @@ export default function DashboardPage() {
                     }}
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
                   >
-                    {courses.map((c) => (
-                      <option key={c.course_code} value={c.course_code}>
-                        {c.course_code} - {c.course_name} ({c.worksheets.length} worksheets)
-                      </option>
-                    ))}
+                    {courses.map((c) => {
+                      const availCount = (c.worksheets || []).filter((w) => w.is_available).length;
+                      return (
+                        <option key={c.course_code} value={c.course_code}>
+                          {c.course_code} - {c.course_name} ({availCount > 0 ? `${availCount} available` : "0 available / Unavailable"})
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
 
                 <div>
                   <label className="block text-slate-300 font-medium mb-1">Available Worksheets</label>
                   <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                    {currentCourse && currentCourse.worksheets.length > 0 ? (
-                      currentCourse.worksheets.map((ws) => {
-                        const isSelected =
-                          selectedWorksheet &&
-                          selectedWorksheet.session === ws.session &&
-                          selectedWorksheet.slo === ws.slo;
+                    {(() => {
+                      if (!currentCourse) {
+                        return <p className="text-slate-500 italic">Select a course to view available worksheets.</p>;
+                      }
+                      const allWs = currentCourse.worksheets || [];
+                      const availableWs = allWs.filter((w) => w.is_available);
+                      const unavailableWs = allWs.filter((w) => !w.is_available);
+                      const sampleWs = unavailableWs[0] || { session: "N/A", slo: "N/A", worksheet_id: "N/A" };
+
+                      if (availableWs.length === 0) {
                         return (
-                          <div
-                            key={ws.worksheet_id || `${ws.session}-${ws.slo}`}
-                            onClick={() => setSelectedWorksheet(ws)}
-                            className={`flex items-center justify-between p-2.5 rounded-lg border cursor-pointer transition ${
-                              isSelected
-                                ? "bg-emerald-950/40 border-emerald-500"
-                                : "bg-slate-900 border-slate-800 hover:border-slate-700"
-                            }`}
-                          >
-                            <div className="flex items-center gap-2">
-                              <input
-                                type="radio"
-                                checked={isSelected || false}
-                                onChange={() => setSelectedWorksheet(ws)}
-                                className="text-emerald-500"
-                              />
-                              <div>
-                                <div className="font-medium text-white">{ws.title || `Session ${ws.session} SLO ${ws.slo}`}</div>
-                                <div className="text-[10px] text-slate-500 font-mono">{ws.filename}</div>
-                              </div>
+                          <div className="p-3.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 space-y-2.5">
+                            <div className="flex items-center gap-2 text-amber-400 font-semibold text-xs">
+                              <span>⚠️</span>
+                              <span>No official SRM worksheet is available for this course/session.</span>
                             </div>
-                            <span
-                              className={`px-2 py-0.5 rounded text-[10px] border ${
-                                ws.submission_status === "VERIFIED"
-                                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                                  : "bg-blue-500/10 text-blue-400 border-blue-500/20"
-                              }`}
-                            >
-                              {ws.submission_status}
-                            </span>
+                            <p className="text-[11px] text-slate-300">
+                              The course coordinator has not uploaded official worksheets to the SRM portal for <strong className="text-white font-mono">{currentCourse.course_code}</strong>.
+                            </p>
+                            <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5 space-y-1.5 font-mono text-[11px]">
+                              <div className="flex justify-between"><span className="text-slate-400">Course:</span> <span className="text-white font-bold">{currentCourse.course_code}</span></div>
+                              <div className="flex justify-between"><span className="text-slate-400">Session:</span> <span className="text-white font-bold">{sampleWs.session}</span></div>
+                              <div className="flex justify-between"><span className="text-slate-400">SLO:</span> <span className="text-white font-bold">{sampleWs.slo}</span></div>
+                              <div className="flex justify-between"><span className="text-slate-400">Worksheet ID:</span> <span className="text-white font-bold">{sampleWs.worksheet_id || `${sampleWs.session}${sampleWs.slo}`}</span></div>
+                              <div className="flex justify-between"><span className="text-slate-400">Availability:</span> <span className="text-rose-400 font-bold uppercase">UNAVAILABLE</span></div>
+                            </div>
+                            <p className="text-[10px] text-slate-400 italic">
+                              Worksheets unavailable on SRM cannot be automated. Synthetic questions are never fabricated.
+                            </p>
                           </div>
                         );
-                      })
-                    ) : (
-                      <p className="text-slate-500 italic">No worksheets available for this course.</p>
-                    )}
+                      }
+
+                      return (
+                        <>
+                          {availableWs.map((ws) => {
+                            const isSelected =
+                              selectedWorksheet &&
+                              selectedWorksheet.session === ws.session &&
+                              selectedWorksheet.slo === ws.slo;
+                            return (
+                              <div
+                                key={ws.worksheet_id || `${ws.session}-${ws.slo}`}
+                                onClick={() => setSelectedWorksheet(ws)}
+                                className={`flex items-center justify-between p-2.5 rounded-lg border cursor-pointer transition ${
+                                  isSelected
+                                    ? "bg-emerald-950/40 border-emerald-500"
+                                    : "bg-slate-900 border-slate-800 hover:border-slate-700"
+                                }`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="radio"
+                                    checked={isSelected || false}
+                                    onChange={() => setSelectedWorksheet(ws)}
+                                    className="text-emerald-500"
+                                  />
+                                  <div>
+                                    <div className="font-medium text-white">{ws.title || `Session ${ws.session} SLO ${ws.slo}`}</div>
+                                    <div className="text-[10px] text-slate-500 font-mono">{ws.filename}</div>
+                                  </div>
+                                </div>
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] border ${
+                                    ws.submission_status === "VERIFIED"
+                                      ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                                      : "bg-blue-500/10 text-blue-400 border-blue-500/20"
+                                  }`}
+                                >
+                                  {ws.submission_status}
+                                </span>
+                              </div>
+                            );
+                          })}
+                          {unavailableWs.length > 0 && (
+                            <div className="mt-3 pt-3 border-t border-slate-800 text-[11px] text-slate-500">
+                              <div className="text-[11px] font-medium text-slate-400 mb-1 flex items-center gap-1.5">
+                                <span>🚫</span>
+                                <span>Unavailable on SRM ({unavailableWs.length} not uploaded by coordinator)</span>
+                              </div>
+                              <p className="text-[10px] text-slate-500 italic">These worksheets are not available on the portal and cannot be automated.</p>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
 
                 <button
                   type="button"
                   onClick={handleStartJob}
-                  disabled={!selectedWorksheet || isStartingJob}
+                  disabled={!selectedWorksheet || !selectedWorksheet.is_available || isStartingJob}
                   className="w-full py-2.5 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-sm transition disabled:opacity-50"
                 >
                   {isStartingJob ? "Starting Background Task..." : "Start Background Automation"}

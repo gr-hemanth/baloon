@@ -10,8 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from docx import Document
-
 import json
 import redis
 from apps.worker.celery_app import celery_app
@@ -21,7 +19,14 @@ from packages.shared.config import settings
 from packages.shared.database import SessionLocal
 from packages.shared.models.job import Job, JobStatus
 from packages.srm.auth_manager import auth_manager
-from packages.srm.exceptions import CaptchaRequired, SRMCaptchaRequired, SRMException
+from packages.srm.exceptions import (
+    CaptchaRequired,
+    SRMCaptchaRequired,
+    SRMException,
+    WorksheetNotFound,
+    SRMWorksheetNotFoundError,
+    DownloadFailed,
+)
 from packages.srm.orchestrator import SRMOrchestrator
 
 from packages.worksheets.answer_engine import AnswerEngineFactory
@@ -159,7 +164,8 @@ async def _run_job_workflow(
         try:
             # 2. Connect to SRM portal
             await orchestrator.connect()
-            job.transport_mode = orchestrator.transport_name
+            if hasattr(orchestrator, "transport_name") and isinstance(orchestrator.transport_name, str):
+                job.transport_mode = orchestrator.transport_name
             db.commit()
 
             # 3. Authenticate with portal credentials (or handle CAPTCHA challenge)
@@ -261,7 +267,8 @@ async def _run_job_workflow(
                 job.status = JobStatus.RUNNING
                 job.current_step = "authenticated"
                 job.captcha_challenge = None
-                job.transport_mode = orchestrator.transport_name
+                if hasattr(orchestrator, "transport_name") and isinstance(orchestrator.transport_name, str):
+                    job.transport_mode = orchestrator.transport_name
                 job.updated_at = datetime.now(timezone.utc)
                 db.commit()
 
@@ -462,10 +469,15 @@ async def _run_job_workflow(
                         session_num = target_ws.session or session_num
                         slo_num = target_ws.slo or slo_num
                         logger.info(
-                            "Target worksheet selected from SRM discovery: session=%d, slo=%d, filename=%s",
-                            session_num, slo_num, worksheet_filename
+                            "Target worksheet selected from SRM discovery: session=%d, slo=%d, filename=%s, is_available=%s",
+                            session_num, slo_num, worksheet_filename, target_ws.is_available
                         )
                         if not file_url:
+                            # If discovery already confirmed worksheet is unavailable on portal, fail immediately
+                            if not target_ws.is_available:
+                                raise WorksheetNotFound(
+                                    f"No official SRM worksheet is available for {course_code} Session {session_num} SLO {slo_num} (Worksheet {worksheet_filename})."
+                                )
                             file_url = await orchestrator.get_worksheet_file(
                                 course_code=course_code,
                                 session=session_num,
@@ -475,7 +487,10 @@ async def _run_job_workflow(
                             )
                     else:
                         # Explicit worksheet requested but not found in discovered (or discovery empty)
-                        # Derive directly without falling back to a different SLO
+                        if not has_explicit_ws:
+                            raise WorksheetNotFound(
+                                f"No official SRM worksheets are available for course {course_code}."
+                            )
                         worksheet_filename = f"{session_num}{slo_num}.docx"
                         file_url = await orchestrator.get_worksheet_file(
                             course_code=course_code,
@@ -484,10 +499,18 @@ async def _run_job_workflow(
                             format_type="docx",
                             filename=worksheet_filename,
                         )
+                except (WorksheetNotFound, SRMWorksheetNotFoundError):
+                    raise
                 except Exception as disc_err:
-                    logger.warning("Worksheet discovery query returned %s; using standard schema locator", disc_err)
-                    worksheet_filename = f"{session_num}{slo_num}.docx"
-                    file_url = f"data/coordinator/{course_code}/slp/{session_num}{slo_num}.docx"
+                    logger.error("Worksheet discovery / file lookup failed for %s (%s): %s", course_code, worksheet_filename, disc_err)
+                    raise WorksheetNotFound(
+                        f"No official SRM worksheet is available for {course_code} Session {session_num} SLO {slo_num}: {disc_err}"
+                    ) from disc_err
+
+                if not file_url:
+                    raise WorksheetNotFound(
+                        f"No official SRM worksheet is available for {course_code} Session {session_num} SLO {slo_num} (Worksheet {worksheet_filename})."
+                    )
 
                 try:
                     downloaded_file = await orchestrator.download_worksheet(
@@ -496,16 +519,13 @@ async def _run_job_workflow(
                         filename=worksheet_filename,
                     )
                 except Exception as dl_err:
-                    logger.warning("Download via orchestrator failed: %s; creating standard template", dl_err)
-                    downloaded_file = job_temp_dir / worksheet_filename
-                    doc = Document()
-                    doc.add_heading(f"Course: {course_code} Session: {session_num} SLO: {slo_num}", level=1)
-                    doc.add_paragraph("1. Explain the fundamental architectural concepts.")
-                    doc.add_paragraph("Answer: ")
-                    doc.save(str(downloaded_file))
+                    logger.error("Official worksheet download failed for %s (%s): %s", course_code, file_url, dl_err)
+                    raise WorksheetNotFound(
+                        f"Official worksheet download failed for {course_code} Session {session_num} SLO {slo_num}: {dl_err}"
+                    ) from dl_err
 
-            if not downloaded_file.exists():
-                raise FileNotFoundError(f"Downloaded worksheet not found at {downloaded_file}")
+            if downloaded_file is None or not downloaded_file.exists():
+                raise WorksheetNotFound(f"Downloaded worksheet not found at {downloaded_file}")
 
             # 8. State: PROCESSING (Generic Parsing, Answer Generation, Document Filling)
             job.status = JobStatus.PROCESSING
@@ -655,6 +675,30 @@ async def _run_job_workflow(
             db.commit()
             if credentials:
                 store_job_credentials(job_id, credentials)
+        except (WorksheetNotFound, SRMWorksheetNotFoundError, DownloadFailed) as ws_err:
+            err_msg = redact_sensitive_info(str(ws_err))
+            logger.warning("Job %s stopped – official worksheet unavailable: %s", job_id, err_msg)
+            if job is not None:
+                job.status = JobStatus.FAILED
+                job.current_step = "worksheet_unavailable"
+                job.error_message = err_msg
+                res = dict(job.result or {})
+                res.update({
+                    "error": "WORKSHEET_UNAVAILABLE",
+                    "message": err_msg,
+                    "course_code": course_code,
+                    "session": session_num,
+                    "slo": slo_num,
+                    "worksheet_id": getattr(job, "worksheet_id", None) or f"{session_num}{slo_num}",
+                    "is_available": False,
+                    "review_ready": False,
+                    "submission_allowed": False,
+                })
+                job.result = res
+                job.updated_at = datetime.now(timezone.utc)
+                db.commit()
+            clear_job_credentials(job_id)
+            return
 
         except Exception as exc:
             err_msg = redact_sensitive_info(str(exc))
@@ -750,7 +794,8 @@ async def _run_submission_workflow(
             orchestrator = SRMOrchestrator(mode=job.transport_mode or "auto")
             close_orchestrator = True
             await orchestrator.connect()
-            job.transport_mode = orchestrator.transport_name
+            if hasattr(orchestrator, "transport_name") and isinstance(orchestrator.transport_name, str):
+                job.transport_mode = orchestrator.transport_name
             db.commit()
 
             if credentials:
