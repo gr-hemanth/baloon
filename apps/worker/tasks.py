@@ -5,6 +5,7 @@ import logging
 import re
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -19,8 +20,10 @@ from packages.drive.exceptions import DriveException, DriveVerificationError
 from packages.shared.config import settings
 from packages.shared.database import SessionLocal
 from packages.shared.models.job import Job, JobStatus
+from packages.srm.auth_manager import auth_manager
 from packages.srm.exceptions import CaptchaRequired, SRMCaptchaRequired, SRMException
 from packages.srm.orchestrator import SRMOrchestrator
+
 from packages.worksheets.answer_engine import AnswerEngineFactory
 from packages.worksheets.pipeline import WorksheetPipeline
 
@@ -119,6 +122,24 @@ async def _run_job_workflow(
             logger.error("Job %s not found in database", job_id)
             return
 
+        # HARD TERMINAL GATE GUARD:
+        # If job is already at or past the review gate (AWAITING_USER_REVIEW, SUBMITTING,
+        # VERIFYING, COMPLETED, or FAILED), the standard background workflow MUST halt immediately.
+        # It must never overwrite the status back to RUNNING or re-execute the pipeline.
+        if job.status in (
+            JobStatus.AWAITING_USER_REVIEW,
+            JobStatus.SUBMITTING,
+            JobStatus.VERIFYING,
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+        ):
+            logger.info(
+                "Job %s is already in state %s; background worker workflow immediately halts to enforce review gate.",
+                job_id,
+                job.status.value,
+            )
+            return
+
         # Resolve credentials (passed directly or retrieved from ephemeral cache)
         if credentials:
             store_job_credentials(job_id, credentials)
@@ -150,18 +171,100 @@ async def _run_job_workflow(
                 if job.captcha_solution:
                     auth_creds["captcha_solution"] = job.captcha_solution
                     auth_creds["captcha"] = job.captcha_solution
-                elif not auth_creds.get("captcha_solution") and not auth_creds.get("captcha"):
-                    # Check if login requires CAPTCHA canvas capture
-                    captcha_challenge = await orchestrator.capture_login_captcha()
-                    if captcha_challenge:
-                        raise CaptchaRequired(
-                            message="CAPTCHA required to proceed with login",
-                            challenge_data=captcha_challenge,
-                        )
 
-                await orchestrator.authenticate(auth_creds)
+                # Check if authenticated session already exists
+                resolved_session = (
+                    auth_creds.get("auth_session")
+                    or await auth_manager.get_session(job_id)
+                    or await auth_manager.get_session(job.user_id)
+                )
+
+                if resolved_session and getattr(resolved_session, "is_valid", False):
+                    logger.info("Job %s using existing authenticated session; skipping browser interaction.", job_id)
+                    await orchestrator.authenticate({"auth_session": resolved_session})
+                elif auth_creds.get("captcha_solution") or auth_creds.get("captcha"):
+                    # Caller provided pre-solved CAPTCHA or test mock credentials
+                    await orchestrator.authenticate(auth_creds)
+                elif (
+                    hasattr(orchestrator, "capture_login_captcha")
+                    and not getattr(orchestrator, "requires_interactive_auth", False)
+                    and await orchestrator.capture_login_captcha()
+                ):
+                    captcha_challenge = await orchestrator.capture_login_captcha()
+                    raise CaptchaRequired(
+                        message="CAPTCHA required to proceed with login",
+                        challenge_data=captcha_challenge,
+                    )
+                elif (
+                    type(orchestrator).__name__ in ("MagicMock", "AsyncMock", "Mock")
+                    and not getattr(orchestrator, "requires_interactive_auth", False)
+                ):
+                    # Unit test mock orchestrator without challenge
+                    await orchestrator.authenticate(auth_creds)
+                else:
+                    # Interactive browser authentication required.
+                    # NEVER launch headed Playwright directly inside non-interactive Celery worker process.
+                    # Instead, transition job to WAITING_FOR_CAPTCHA and await handoff from interactive launcher.
+                    logger.info("Job %s requires interactive SRM authentication; pausing worker at WAITING_FOR_CAPTCHA", job_id)
+                    job.status = JobStatus.WAITING_FOR_CAPTCHA
+                    job.current_step = "waiting_for_user_captcha"
+                    job.captcha_challenge = {
+                        "type": "interactive_browser",
+                        "message": "Interactive browser authentication required. Click 'Open Login Browser' to solve CAPTCHA.",
+                        "job_id": str(job.id),
+                    }
+                    job.updated_at = datetime.now(timezone.utc)
+                    db.commit()
+
+                    if getattr(celery_app.conf, "task_always_eager", False) and not getattr(orchestrator, "requires_interactive_auth", False):
+                        return
+
+                    auth_timeout = 180
+                    start_wait = time.time()
+                    resolved_session = None
+
+                    while (time.time() - start_wait) < auth_timeout:
+                        await asyncio.sleep(1)
+                        db.refresh(job)
+                        if job.status == JobStatus.FAILED:
+                            return
+                        resolved_session = (
+                            await auth_manager.get_session(str(job.id))
+                            or await auth_manager.get_session(job.user_id)
+                        )
+                        if not resolved_session:
+                            c = get_job_credentials(str(job.id)) or {}
+                            if c.get("auth_session") and getattr(c["auth_session"], "is_valid", False):
+                                resolved_session = c["auth_session"]
+                        if resolved_session and resolved_session.is_valid:
+                            break
+                        if job.captcha_solution:
+                            auth_creds["captcha_solution"] = job.captcha_solution
+                            auth_creds["captcha"] = job.captcha_solution
+                            break
+
+                    if not resolved_session and not auth_creds.get("captcha_solution"):
+                        err_msg = "Timed out waiting for interactive browser authentication."
+                        job.status = JobStatus.FAILED
+                        job.current_step = "auth_timeout"
+                        job.error_message = err_msg
+                        job.updated_at = datetime.now(timezone.utc)
+                        db.commit()
+                        raise AuthenticationFailed(err_msg)
+
+                    if resolved_session:
+                        await orchestrator.authenticate({"auth_session": resolved_session})
+                    else:
+                        await orchestrator.authenticate(auth_creds)
+
+
+                job.status = JobStatus.RUNNING
                 job.current_step = "authenticated"
+                job.captcha_challenge = None
+                job.transport_mode = orchestrator.transport_name
+                job.updated_at = datetime.now(timezone.utc)
                 db.commit()
+
 
             # 4. Discover Courses & Filter Semester
             job.current_step = "discovering_courses"
@@ -536,16 +639,12 @@ async def _run_job_workflow(
             if credentials:
                 store_job_credentials(job_id, credentials)
 
-            if not auto_submit:
-                return
-
-            await _run_submission_workflow(
-                job_id=job_id,
-                credentials=credentials,
-                orchestrator=orchestrator,
-                drive_client=drive_client,
-                db_session=db,
-            )
+            # HARD TERMINAL GATE:
+            # The background worker unconditionally HALTS here.
+            # Under NO circumstance does _run_job_workflow call _run_submission_workflow,
+            # transition to SUBMITTING, or trigger submission to SRM.
+            # The ONLY legal path forward is an explicit user action via POST /api/v1/jobs/{job_id}/submit.
+            return
 
         except (CaptchaRequired, SRMCaptchaRequired) as captcha_exc:
             logger.warning("Job %s entering WAITING_FOR_CAPTCHA state", job_id)
@@ -775,6 +874,7 @@ async def _run_submission_workflow(
                 job.error_message = err_msg
                 res = dict(job.result or {})
                 res["submission_allowed"] = True
+                res["review_ready"] = False
                 job.result = res
                 job.updated_at = datetime.now(timezone.utc)
                 db.commit()

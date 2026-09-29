@@ -641,12 +641,24 @@ class TargetWriter:
         """Write into an individual sub-target within a multi-target question."""
         target_id = sub_target.metadata.get("target_id", "")
         text = ""
+
+        # If target_answers is empty or didn't match, check if answer.answer_text is a serialized dict
+        if not answer.target_answers and answer.answer_text and answer.answer_text.strip().startswith("{"):
+            try:
+                import ast
+                t_str = answer.answer_text.strip()
+                parsed_d = json.loads(t_str) if t_str.startswith('{"') else ast.literal_eval(t_str)
+                if isinstance(parsed_d, dict):
+                    answer.target_answers = parsed_d
+            except Exception:
+                pass
+
         if answer.target_answers and target_id in answer.target_answers:
-            text = answer.target_answers[target_id]
+            text = str(answer.target_answers[target_id])
         elif answer.target_answers:
             for k, v in answer.target_answers.items():
-                if k in target_id or target_id.endswith(k):
-                    text = v
+                if k in target_id or target_id.endswith(k) or target_id in k:
+                    text = str(v)
                     break
         if not text:
             text = answer.answer_text

@@ -6,6 +6,7 @@ import {
   getDriveAuthUrl,
   discoverSRMCourses,
   resumeSRMDiscovery,
+  getSRMAuthStatus,
   createJob,
   getJob,
   submitCaptchaSolution,
@@ -68,6 +69,10 @@ export default function DashboardPage() {
   const [captchaError, setCaptchaError] = useState<string | null>(null);
   const [isSubmittingCaptcha, setIsSubmittingCaptcha] = useState(false);
 
+  // SRM Authentication Progress State
+  const [authPhase, setAuthPhase] = useState<"IDLE" | "AUTHENTICATING" | "WAITING_FOR_CAPTCHA" | "AUTHENTICATED" | "DISCOVERING" | "SUCCESS" | "FAILED">("IDLE");
+  const [authMessage, setAuthMessage] = useState<string>("");
+
   // Helper to determine if a job is genuinely active (persisting AWAITING_USER_REVIEW until explicit submission)
   const isGenuinelyActive = (job: JobResponse | null): boolean => {
     if (!job || !job.status) return false;
@@ -95,10 +100,10 @@ export default function DashboardPage() {
       if (
         job &&
         job.status !== "COMPLETED" &&
-        (job.status !== "FAILED" || job.drive_web_view_link || job.result?.drive_web_url)
+        job.status !== "FAILED"
       ) {
         localStorage.setItem("srm_active_job_id", job.id);
-      } else if (job?.status === "COMPLETED") {
+      } else if (job?.status === "COMPLETED" || job?.status === "FAILED") {
         localStorage.removeItem("srm_active_job_id");
       }
     } catch {}
@@ -178,9 +183,24 @@ export default function DashboardPage() {
     setIsDiscovering(true);
     setDiscoveryError(null);
     setCaptchaError(null);
+    setAuthPhase("AUTHENTICATING");
+    setAuthMessage("Authenticating with SRM portal...");
+
+    const poller = setInterval(async () => {
+      try {
+        const sData = await getSRMAuthStatus();
+        if (sData && sData.phase) {
+          setAuthPhase(sData.phase as any);
+          if (sData.message) setAuthMessage(sData.message);
+        }
+      } catch (err) {}
+    }, 750);
+
     try {
       const resp = await discoverSRMCourses(userId, password, semester, undefined, transportMode);
       if (resp.status === "WAITING_FOR_CAPTCHA") {
+        setAuthPhase("WAITING_FOR_CAPTCHA");
+        setAuthMessage("Waiting for CAPTCHA – Please solve the visual CAPTCHA in the SRM browser window.");
         setCaptchaContext("discovery");
         setCaptchaChallenge(resp.captcha_challenge);
         setCaptchaSolution("");
@@ -188,13 +208,17 @@ export default function DashboardPage() {
         setShowCaptcha(true);
         return;
       }
+      setAuthPhase("SUCCESS");
+      setAuthMessage("Authentication successful. Worksheets discovered.");
       setCourses(resp.courses);
       if (resp.courses.length > 0) {
         setSelectedCourseCode(resp.courses[0].course_code);
       }
     } catch (err: any) {
+      setAuthPhase("FAILED");
       setDiscoveryError(err.message);
     } finally {
+      clearInterval(poller);
       setIsDiscovering(false);
     }
   };
@@ -243,7 +267,7 @@ export default function DashboardPage() {
     if (
       !activeJob ||
       activeJob.status === "COMPLETED" ||
-      (activeJob.status === "FAILED" && !activeJob.drive_web_view_link && !activeJob.result?.drive_web_url)
+      activeJob.status === "FAILED"
     ) {
       return;
     }
@@ -474,6 +498,110 @@ export default function DashboardPage() {
                 </button>
               </form>
 
+              {/* 4-Phase Authentication Status Tracker */}
+              {authPhase !== "IDLE" && (
+                <div className="mt-4 pt-4 border-t border-slate-800 space-y-3">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-400 font-medium">Authentication Status:</span>
+                    <span
+                      className={`text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider border ${
+                        authPhase === "WAITING_FOR_CAPTCHA"
+                          ? "bg-amber-500/10 text-amber-400 border-amber-500/20 pulse-dot"
+                          : authPhase === "AUTHENTICATED" || authPhase === "SUCCESS"
+                          ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                          : authPhase === "FAILED"
+                          ? "bg-red-500/10 text-red-400 border-red-500/20"
+                          : "bg-blue-500/10 text-blue-400 border-blue-500/20"
+                      }`}
+                    >
+                      {authPhase === "AUTHENTICATING"
+                        ? "Authenticating with SRM"
+                        : authPhase === "WAITING_FOR_CAPTCHA"
+                        ? "Waiting for CAPTCHA"
+                        : authPhase === "AUTHENTICATED"
+                        ? "Authentication successful"
+                        : authPhase === "DISCOVERING"
+                        ? "Discovering worksheets"
+                        : authPhase === "SUCCESS"
+                        ? "Completed"
+                        : authPhase === "FAILED"
+                        ? "Authentication Failed"
+                        : authPhase}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    {/* Phase 1: Authenticating with SRM */}
+                    <div
+                      className={`p-2 rounded-lg border flex items-center gap-2 ${
+                        authPhase === "AUTHENTICATING"
+                          ? "bg-slate-900 border-blue-500/40 text-blue-300 font-semibold"
+                          : ["WAITING_FOR_CAPTCHA", "AUTHENTICATED", "DISCOVERING", "SUCCESS"].includes(authPhase)
+                          ? "bg-slate-950 border-emerald-500/30 text-emerald-400"
+                          : "bg-slate-950 border-slate-800 text-slate-500"
+                      }`}
+                    >
+                      <span>{["WAITING_FOR_CAPTCHA", "AUTHENTICATED", "DISCOVERING", "SUCCESS"].includes(authPhase) ? "✓" : "●"}</span>
+                      <span className="text-[11px] font-medium">Authenticating with SRM</span>
+                    </div>
+
+                    {/* Phase 2: Waiting for CAPTCHA */}
+                    <div
+                      className={`p-2 rounded-lg border flex items-center gap-2 ${
+                        authPhase === "WAITING_FOR_CAPTCHA"
+                          ? "bg-slate-900 border-amber-500/40 text-amber-300 font-semibold"
+                          : ["AUTHENTICATED", "DISCOVERING", "SUCCESS"].includes(authPhase)
+                          ? "bg-slate-950 border-emerald-500/30 text-emerald-400"
+                          : "bg-slate-950 border-slate-800 text-slate-500"
+                      }`}
+                    >
+                      <span>{["AUTHENTICATED", "DISCOVERING", "SUCCESS"].includes(authPhase) ? "✓" : "●"}</span>
+                      <span className="text-[11px] font-medium">Waiting for CAPTCHA</span>
+                    </div>
+
+                    {/* Phase 3: Authentication successful */}
+                    <div
+                      className={`p-2 rounded-lg border flex items-center gap-2 ${
+                        ["AUTHENTICATED", "DISCOVERING", "SUCCESS"].includes(authPhase)
+                          ? "bg-slate-950 border-emerald-500/30 text-emerald-400 font-semibold"
+                          : "bg-slate-950 border-slate-800 text-slate-500"
+                      }`}
+                    >
+                      <span>{["AUTHENTICATED", "DISCOVERING", "SUCCESS"].includes(authPhase) ? "✓" : "●"}</span>
+                      <span className="text-[11px] font-medium">Authentication successful</span>
+                    </div>
+
+                    {/* Phase 4: Discovering worksheets */}
+                    <div
+                      className={`p-2 rounded-lg border flex items-center gap-2 ${
+                        authPhase === "DISCOVERING"
+                          ? "bg-slate-900 border-blue-500/40 text-blue-300 font-semibold"
+                          : authPhase === "SUCCESS"
+                          ? "bg-slate-950 border-emerald-500/30 text-emerald-400 font-semibold"
+                          : "bg-slate-950 border-slate-800 text-slate-500"
+                      }`}
+                    >
+                      <span>{authPhase === "SUCCESS" ? "✓" : "●"}</span>
+                      <span className="text-[11px] font-medium">Discovering worksheets</span>
+                    </div>
+                  </div>
+
+                  {/* Browser Window Notice when waiting for CAPTCHA */}
+                  {authPhase === "WAITING_FOR_CAPTCHA" && (
+                    <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-start gap-2.5">
+                      <span className="text-amber-400 text-base">🖥️</span>
+                      <div>
+                        <strong className="text-amber-300">Action Required: Solve CAPTCHA in SRM Browser Window</strong>
+                        <p className="mt-0.5 text-slate-300 text-[11px]">
+                          An SRM login browser window has opened. Please solve the visual CAPTCHA in that window.
+                          Once verified, your session will be captured automatically and discovery will proceed via direct HTTP.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {discoveryError && (
                 <div className="mt-3 p-3 rounded bg-red-950/50 border border-red-800 text-red-300 text-xs">
                   {discoveryError}
@@ -670,8 +798,7 @@ export default function DashboardPage() {
             </div>
 
             {/* Prominent Review Card (AWAITING_USER_REVIEW) */}
-            {(activeJob?.status === "AWAITING_USER_REVIEW" ||
-              (activeJob?.status === "FAILED" && (activeJob.drive_web_view_link || activeJob.result?.drive_web_url))) && (
+            {activeJob?.status === "AWAITING_USER_REVIEW" && (
               <div className="bg-slate-950 border border-amber-500/40 rounded-xl p-5 shadow-xl space-y-4 text-xs">
                 <div className="flex items-center justify-between pb-3 border-b border-slate-800">
                   <div>
@@ -827,11 +954,13 @@ export default function DashboardPage() {
             <div className="flex items-center gap-3 text-amber-400">
               <span className="text-2xl">⚠️</span>
               <div>
-                <h3 className="font-bold text-white text-base">CAPTCHA Required</h3>
+                <h3 className="font-bold text-white text-base">
+                  {captchaChallenge?.image_base64 ? "CAPTCHA Required" : "Solve CAPTCHA in Browser Window"}
+                </h3>
                 <p className="text-xs text-slate-400">
-                  {captchaContext === "discovery"
-                    ? "Solve the portal challenge to authenticate & discover worksheets."
-                    : "Solve the portal challenge to resume background processing."}
+                  {captchaChallenge?.image_base64
+                    ? "Solve the portal challenge to authenticate & proceed."
+                    : "The SRM browser window is waiting for your manual CAPTCHA action."}
                 </p>
               </div>
             </div>
@@ -842,62 +971,90 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {captchaChallenge?.image_base64 && (
-              <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 flex justify-center">
-                <img
-                  src={
-                    captchaChallenge.image_base64.startsWith("data:")
-                      ? captchaChallenge.image_base64
-                      : `data:image/png;base64,${captchaChallenge.image_base64}`
-                  }
-                  alt="CAPTCHA"
-                  className="h-12 bg-white px-2 rounded"
-                />
+            {!captchaChallenge?.image_base64 ? (
+              <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs space-y-2">
+                <p className="font-semibold text-amber-300 flex items-center gap-2">
+                  <span>🖥️</span> Please solve the visual CAPTCHA in the opened SRM window.
+                </p>
+                <p className="text-slate-300 text-[11px] leading-relaxed">
+                  A headed browser window has opened with the SRM login page. Complete the visual challenge there.
+                  Do not close the browser manually—your authenticated session and token will be captured automatically,
+                  the browser will close, and discovery will continue via direct HTTP.
+                </p>
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCaptcha(false);
+                      setCaptchaChallenge(null);
+                      setCaptchaSolution("");
+                      setCaptchaContext(null);
+                      setCaptchaError(null);
+                    }}
+                    className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition"
+                  >
+                    Dismiss Notice
+                  </button>
+                </div>
               </div>
+            ) : (
+              <>
+                <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 flex justify-center">
+                  <img
+                    src={
+                      captchaChallenge.image_base64.startsWith("data:")
+                        ? captchaChallenge.image_base64
+                        : `data:image/png;base64,${captchaChallenge.image_base64}`
+                    }
+                    alt="CAPTCHA"
+                    className="h-12 bg-white px-2 rounded"
+                  />
+                </div>
+
+                <form onSubmit={handleCaptchaSubmit} className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">CAPTCHA Solution</label>
+                    <input
+                      type="text"
+                      required
+                      autoFocus
+                      value={captchaSolution}
+                      onChange={(e) => setCaptchaSolution(e.target.value.toUpperCase())}
+                      placeholder="e.g. 48B92"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-center font-mono text-white tracking-widest uppercase focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="button"
+                      disabled={isSubmittingCaptcha}
+                      onClick={() => {
+                        setShowCaptcha(false);
+                        setCaptchaChallenge(null);
+                        setCaptchaSolution("");
+                        setCaptchaContext(null);
+                        setCaptchaError(null);
+                      }}
+                      className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isSubmittingCaptcha || !captchaSolution.trim()}
+                      className="flex-1 py-2.5 px-4 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-sm transition disabled:opacity-50"
+                    >
+                      {isSubmittingCaptcha
+                        ? "Submitting Solution..."
+                        : captchaContext === "discovery"
+                        ? "Submit Solution & Discover Courses"
+                        : "Submit Solution & Resume Job"}
+                    </button>
+                  </div>
+                </form>
+              </>
             )}
-
-            <form onSubmit={handleCaptchaSubmit} className="space-y-3">
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">CAPTCHA Solution</label>
-                <input
-                  type="text"
-                  required
-                  autoFocus
-                  value={captchaSolution}
-                  onChange={(e) => setCaptchaSolution(e.target.value.toUpperCase())}
-                  placeholder="e.g. 48B92"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-center font-mono text-white tracking-widest uppercase focus:outline-none focus:border-amber-500"
-                />
-              </div>
-
-              <div className="flex gap-2 pt-1">
-                <button
-                  type="button"
-                  disabled={isSubmittingCaptcha}
-                  onClick={() => {
-                    setShowCaptcha(false);
-                    setCaptchaChallenge(null);
-                    setCaptchaSolution("");
-                    setCaptchaContext(null);
-                    setCaptchaError(null);
-                  }}
-                  className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmittingCaptcha || !captchaSolution.trim()}
-                  className="flex-1 py-2.5 px-4 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-sm transition disabled:opacity-50"
-                >
-                  {isSubmittingCaptcha
-                    ? "Submitting Solution..."
-                    : captchaContext === "discovery"
-                    ? "Submit Solution & Discover Courses"
-                    : "Submit Solution & Resume Job"}
-                </button>
-              </div>
-            </form>
           </div>
         </div>
       )}

@@ -122,6 +122,11 @@ class PhysicalDocumentVerifier:
         seen_answer_snippets = set()
         duplicate_count = 0
 
+        # Scan original document text to avoid false positives on synthesized question text
+        orig_doc = docx.Document(str(original_path))
+        orig_para_texts = [p.text.strip() for p in orig_doc.paragraphs if p.text.strip()]
+        orig_cell_texts = [c.text.strip() for t in orig_doc.tables for r in t.rows for c in r.cells if c.text.strip()]
+
         # Scan all document text (paragraphs and table cells)
         all_para_texts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
         all_cell_texts = []
@@ -206,10 +211,13 @@ class PhysicalDocumentVerifier:
                     else:
                         errors.append(f"Answer for question {q.question_id} not found in completed document text.")
 
-        # 5. Check questions text wasn't overwritten
+        # 5. Check questions text wasn't overwritten (for questions physically present in the original document)
         for q in worksheet.questions:
             q_clean = q.question_text.splitlines()[0][:40].lower()
-            if not any(q_clean in pt.lower() for pt in all_para_texts) and not any(
+            was_in_orig = any(q_clean in pt.lower() for pt in orig_para_texts) or any(
+                q_clean in ct.lower() for ct in orig_cell_texts
+            )
+            if was_in_orig and not any(q_clean in pt.lower() for pt in all_para_texts) and not any(
                 q_clean in ct.lower() for ct in all_cell_texts
             ):
                 errors.append(f"Question text for '{q.question_id}' appears to have been altered or erased.")

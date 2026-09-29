@@ -96,8 +96,8 @@ class JobResponse(BaseModel):
     @property
     def review_ready(self) -> bool:
         """True when the job has uploaded and verified Drive link and is awaiting review."""
-        if self.status == JobStatus.AWAITING_USER_REVIEW:
-            return True
+        if self.status != JobStatus.AWAITING_USER_REVIEW:
+            return False
         return bool(self.result and self.result.get("review_ready"))
 
     @computed_field

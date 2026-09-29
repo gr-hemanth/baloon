@@ -40,6 +40,19 @@ export interface SRMDiscoverResponse {
   captcha_challenge?: any;
 }
 
+export interface SRMAuthStatus {
+  phase: "IDLE" | "AUTHENTICATING" | "WAITING_FOR_CAPTCHA" | "AUTHENTICATED" | "DISCOVERING" | "SUCCESS" | "FAILED";
+  message: string;
+  user_id?: string;
+  updated_at: string;
+}
+
+export async function getSRMAuthStatus(): Promise<SRMAuthStatus> {
+  const res = await fetch(`${API_BASE}/srm/status`);
+  if (!res.ok) throw new Error("Failed to fetch SRM auth status");
+  return res.json();
+}
+
 export interface JobResponse {
   id: string;
   user_id?: string;

@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from packages.shared.database import get_db
 from packages.shared.models.job import Job, JobStatus
 from packages.shared.schemas.job import JobCreate, JobResponse, CaptchaSubmit, JobSubmitRequest
+from packages.srm.auth_manager import auth_manager
+
 from apps.worker.tasks import (
     process_job,
     submit_job,
@@ -56,7 +58,7 @@ def create_job(job_in: JobCreate, db: Session = Depends(get_db)):
                 ref_time = ref_time.replace(tzinfo=timezone.utc)
             job_age = (now - ref_time).total_seconds()
 
-            if job_age > 600 and existing_active.status in (JobStatus.PENDING, JobStatus.RUNNING):
+            if job_age > 600 and existing_active.status != JobStatus.AWAITING_USER_REVIEW:
                 logger.warning(
                     "Auto-failing stale orphaned job %s (age: %.1fs, status: %s)",
                     existing_active.id, job_age, existing_active.status.value
@@ -109,8 +111,15 @@ def create_job(job_in: JobCreate, db: Session = Depends(get_db)):
     if job_in.slo is not None:
         creds["requested_slo"] = job_in.slo
 
+    # Auto-attach active auth session if already authenticated (e.g. from discovery)
+    cached_session = auth_manager._sessions.get(job_in.user_id)
+    if cached_session and getattr(cached_session, "is_valid", False):
+        creds["auth_session"] = cached_session
+        logger.info("Auto-attached existing active auth_session for user %s to job %s", job_in.user_id, new_job.id)
+
     if creds:
         store_job_credentials(new_job.id, creds)
+
 
     # Dispatch to Celery background worker
     try:
@@ -272,9 +281,8 @@ def submit_job_to_srm(
         logger.info("Job %s is already COMPLETED", job_id)
         return job
 
-    # Only allow submission from AWAITING_USER_REVIEW or retryable FAILED state
-    is_retryable_failed = bool(job.status == JobStatus.FAILED and job.result and job.result.get("drive_web_url"))
-    if job.status != JobStatus.AWAITING_USER_REVIEW and not is_retryable_failed:
+    # HARD TERMINAL GATE: Only AWAITING_USER_REVIEW can transition to SUBMITTING via explicit user submit
+    if job.status != JobStatus.AWAITING_USER_REVIEW:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Job cannot be submitted from status '{job.status.value}'. Must be AWAITING_USER_REVIEW.",

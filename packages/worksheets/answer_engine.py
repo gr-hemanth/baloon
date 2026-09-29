@@ -2075,8 +2075,22 @@ class LLMAnswerEngine(BaseAnswerEngine):
                 if not isinstance(target_answers, dict):
                     target_answers = ans_data.get("targets") if isinstance(ans_data.get("targets"), dict) else {}
 
-                # Fallback: if ans_text is empty but target_answers is present
-                if not ans_text and target_answers:
+                raw_ans_val = ans_data.get("answer_text") or ans_data.get("answer")
+                if isinstance(raw_ans_val, dict) and not target_answers:
+                    target_answers = raw_ans_val
+
+                # If target_answers is empty, but ans_text is a serialized dict
+                if not target_answers and ans_text and ans_text.startswith("{"):
+                    try:
+                        import ast
+                        parsed_d = json.loads(ans_text) if ans_text.startswith('{"') else ast.literal_eval(ans_text)
+                        if isinstance(parsed_d, dict):
+                            target_answers = parsed_d
+                    except Exception:
+                        pass
+
+                # Fallback: if ans_text is empty or serialized dict but target_answers is present
+                if (not ans_text or ans_text.startswith("{")) and target_answers:
                     ans_text = "\n".join(str(v).strip() for v in target_answers.values() if str(v).strip())
 
                 ans_resp_mode_str = ans_data.get("response_mode")

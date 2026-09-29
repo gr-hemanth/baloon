@@ -132,6 +132,50 @@
             </button>
           </form>
 
+          <!-- Real-Time SRM Authentication & Discovery Status Tracker -->
+          <div id="auth-progress-panel" class="hidden mt-4 p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-shield-halved text-blue-400"></i> SRM Authentication Flow
+              </span>
+              <span id="auth-phase-badge" class="text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider border border-blue-500/20 bg-blue-500/10 text-blue-400">
+                Authenticating with SRM
+              </span>
+            </div>
+
+            <!-- 4 Distinct Status Steps -->
+            <div class="grid grid-cols-2 gap-2 text-xs">
+              <div id="phase-step-1" class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center gap-2 text-slate-300">
+                <span id="phase-icon-1"><i class="fa-solid fa-spinner fa-spin text-blue-400"></i></span>
+                <span class="font-medium">Authenticating with SRM</span>
+              </div>
+              <div id="phase-step-2" class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center gap-2 text-slate-500">
+                <span id="phase-icon-2"><i class="fa-regular fa-circle"></i></span>
+                <span class="font-medium">Waiting for CAPTCHA</span>
+              </div>
+              <div id="phase-step-3" class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center gap-2 text-slate-500">
+                <span id="phase-icon-3"><i class="fa-regular fa-circle"></i></span>
+                <span class="font-medium">Authentication successful</span>
+              </div>
+              <div id="phase-step-4" class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center gap-2 text-slate-500">
+                <span id="phase-icon-4"><i class="fa-regular fa-circle"></i></span>
+                <span class="font-medium">Discovering worksheets</span>
+              </div>
+            </div>
+
+            <!-- Browser Window Notice when waiting for CAPTCHA -->
+            <div id="auth-captcha-notice" class="hidden p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-start gap-2.5">
+              <i class="fa-solid fa-window-maximize fa-bounce text-amber-400 text-sm mt-0.5"></i>
+              <div>
+                <strong class="text-amber-300">Action Required: Solve CAPTCHA in SRM Browser Window</strong>
+                <p class="mt-0.5 text-slate-300 text-[11px]">
+                  An SRM login browser window has opened. Please solve the visual CAPTCHA in that window.
+                  Once verified, your session will be captured automatically and discovery will proceed via direct HTTP.
+                </p>
+              </div>
+            </div>
+          </div>
+
           <!-- Inline Discovery Message -->
           <div id="discovery-msg" class="mt-3 text-xs hidden"></div>
         </div>
@@ -442,8 +486,20 @@
           </button>
         </div>
       </form>
+
+      <!-- Interactive Desktop Browser Launcher -->
+      <div class="pt-3 border-t border-slate-800 space-y-2">
+        <div class="text-[11px] text-slate-400 text-center font-medium">Or open secure interactive login window:</div>
+        <button type="button" id="launch-browser-modal-btn" onclick="launchInteractiveBrowserFromModal()"
+          class="w-full py-2.5 px-4 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center justify-center gap-2 shadow-lg shadow-blue-600/20 transition">
+          <i class="fa-brands fa-chrome text-sm"></i>
+          <span id="launch-browser-modal-btn-text">Open Interactive Login Browser</span>
+        </button>
+        <p id="browser-launch-status-text" class="text-[11px] text-slate-400 text-center mt-1 hidden"></p>
+      </div>
     </div>
   </div>
+
 
   <!-- Submit Confirmation Modal -->
   <div id="submit-confirm-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
@@ -553,6 +609,101 @@
       }
     });
 
+    function renderAuthProgress(phase, message) {
+      const panel = document.getElementById("auth-progress-panel");
+      const badge = document.getElementById("auth-phase-badge");
+      const notice = document.getElementById("auth-captcha-notice");
+      if (!panel) return;
+      panel.classList.remove("hidden");
+
+      const s1 = document.getElementById("phase-step-1");
+      const s2 = document.getElementById("phase-step-2");
+      const s3 = document.getElementById("phase-step-3");
+      const s4 = document.getElementById("phase-step-4");
+      const i1 = document.getElementById("phase-icon-1");
+      const i2 = document.getElementById("phase-icon-2");
+      const i3 = document.getElementById("phase-icon-3");
+      const i4 = document.getElementById("phase-icon-4");
+
+      const resetStep = (el, iconEl) => {
+        el.className = "p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center gap-2 text-slate-500";
+        iconEl.innerHTML = '<i class="fa-regular fa-circle text-slate-600"></i>';
+      };
+      const activeStep = (el, iconEl, color) => {
+        el.className = `p-2.5 rounded-lg bg-slate-900 border border-${color}-500/40 flex items-center gap-2 text-${color}-300 font-semibold`;
+        iconEl.innerHTML = `<i class="fa-solid fa-spinner fa-spin text-${color}-400"></i>`;
+      };
+      const doneStep = (el, iconEl) => {
+        el.className = "p-2.5 rounded-lg bg-slate-950 border border-emerald-500/30 flex items-center gap-2 text-emerald-400";
+        iconEl.innerHTML = '<i class="fa-solid fa-check text-emerald-400"></i>';
+      };
+
+      if (phase === "AUTHENTICATING") {
+        badge.textContent = "Authenticating with SRM";
+        badge.className = "text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider border border-blue-500/20 bg-blue-500/10 text-blue-400";
+        activeStep(s1, i1, "blue");
+        resetStep(s2, i2);
+        resetStep(s3, i3);
+        resetStep(s4, i4);
+        notice.classList.add("hidden");
+      } else if (phase === "OPENING_BROWSER") {
+        badge.textContent = "Opening Login Browser";
+        badge.className = "text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider border border-blue-500/20 bg-blue-500/10 text-blue-400 pulse-dot";
+        doneStep(s1, i1);
+        activeStep(s2, i2, "blue");
+        resetStep(s3, i3);
+        resetStep(s4, i4);
+        notice.textContent = "Launching SRM login browser window...";
+        notice.className = "mt-2 p-2 rounded bg-blue-950/60 border border-blue-800 text-blue-300 text-xs";
+        notice.classList.remove("hidden");
+      } else if (phase === "WAITING_FOR_CAPTCHA") {
+        badge.textContent = "Waiting for CAPTCHA";
+        badge.className = "text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider border border-amber-500/20 bg-amber-500/10 text-amber-400 pulse-dot";
+        doneStep(s1, i1);
+        activeStep(s2, i2, "amber");
+        resetStep(s3, i3);
+        resetStep(s4, i4);
+        notice.textContent = message || "SRM login browser window has opened. Please solve the CAPTCHA in the opened window.";
+        notice.className = "mt-2 p-2 rounded bg-amber-950/60 border border-amber-800 text-amber-300 text-xs";
+        notice.classList.remove("hidden");
+      } else if (phase === "AUTHENTICATION_ERROR" || phase === "FAILED") {
+        badge.textContent = "Authentication Error";
+        badge.className = "text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider border border-red-500/20 bg-red-500/10 text-red-400";
+        resetStep(s1, i1);
+        resetStep(s2, i2);
+        resetStep(s3, i3);
+        resetStep(s4, i4);
+        notice.textContent = message || "Authentication failed to launch or complete.";
+        notice.className = "mt-2 p-2 rounded bg-red-950/60 border border-red-800 text-red-300 text-xs";
+        notice.classList.remove("hidden");
+      } else if (phase === "AUTHENTICATED") {
+        badge.textContent = "Authentication successful";
+        badge.className = "text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider border border-emerald-500/20 bg-emerald-500/10 text-emerald-400";
+        doneStep(s1, i1);
+        doneStep(s2, i2);
+        doneStep(s3, i3);
+        resetStep(s4, i4);
+        notice.classList.add("hidden");
+      } else if (phase === "DISCOVERING") {
+        badge.textContent = "Discovering worksheets";
+        badge.className = "text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider border border-blue-500/20 bg-blue-500/10 text-blue-400";
+        doneStep(s1, i1);
+        doneStep(s2, i2);
+        doneStep(s3, i3);
+        activeStep(s4, i4, "blue");
+        notice.classList.add("hidden");
+      } else if (phase === "SUCCESS") {
+        badge.textContent = "Completed";
+        badge.className = "text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider border border-emerald-500/20 bg-emerald-500/10 text-emerald-400";
+        doneStep(s1, i1);
+        doneStep(s2, i2);
+        doneStep(s3, i3);
+        doneStep(s4, i4);
+        notice.classList.add("hidden");
+      }
+
+    }
+
     // Step 1: Discover Courses
     async function discoverCourses(e) {
       e.preventDefault();
@@ -568,6 +719,16 @@
       btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Authenticating & Discovering...`;
       msg.classList.add("hidden");
 
+      renderAuthProgress("AUTHENTICATING", "Authenticating with SRM portal...");
+      const poller = setInterval(async () => {
+        try {
+          const sRes = await fetch("/api/v1/srm/status");
+          if (!sRes.ok) return;
+          const sData = await sRes.json();
+          if (sData.phase) renderAuthProgress(sData.phase, sData.message);
+        } catch (e) {}
+      }, 750);
+
       try {
         const res = await fetch("/api/v1/srm/discover", {
           method: "POST",
@@ -582,6 +743,7 @@
 
         if (data.status === "WAITING_FOR_CAPTCHA") {
           currentCaptchaContext = "discovery";
+          renderAuthProgress("WAITING_FOR_CAPTCHA", "Waiting for CAPTCHA – Please solve the CAPTCHA in the opened SRM browser window.");
           showCaptchaModal(data.captcha_challenge, async (sol) => {
             let resumeRes = await fetch("/api/v1/srm/discover/resume", {
               method: "POST",
@@ -620,12 +782,14 @@
             }
             hideCaptchaModal();
             currentCaptchaContext = null;
+            renderAuthProgress("SUCCESS", "Discovery completed successfully.");
             handleDiscoverySuccess(resData);
             return true;
           }, "discovery");
           return;
         }
 
+        renderAuthProgress("SUCCESS", "Discovery completed successfully.");
         handleDiscoverySuccess(data);
 
       } catch (err) {
@@ -633,6 +797,7 @@
         msg.className = "mt-3 text-xs text-red-400";
         msg.classList.remove("hidden");
       } finally {
+        clearInterval(poller);
         btn.disabled = false;
         btn.innerHTML = `<i class="fa-solid fa-magnifying-glass"></i> Discover Semester 3 Worksheets`;
       }
@@ -855,9 +1020,8 @@
         } else if (job.status === "FAILED") {
           clearInterval(pollInterval);
           hideCaptchaModal();
-          if (job.drive_web_view_link || (job.result && job.result.drive_web_url)) {
-            showReviewCard(job);
-          }
+          document.getElementById("review-card").classList.add("hidden");
+          try { localStorage.removeItem("srm_active_job_id"); } catch (e) {}
           showErrorAlert(job.error_message);
         }
       } catch (err) {
@@ -1070,6 +1234,98 @@
     let captchaResolver = null;
     let isSubmittingCaptcha = false;
     let currentCaptchaContext = null;
+    let activeBrowserPoller = null;
+
+    async function launchInteractiveBrowserFromModal() {
+      const btn = document.getElementById("launch-browser-modal-btn");
+      const btnText = document.getElementById("launch-browser-modal-btn-text");
+      const statusText = document.getElementById("browser-launch-status-text");
+
+      btn.disabled = true;
+      btnText.textContent = "Launching Browser...";
+      statusText.textContent = "Requesting secure login window...";
+      statusText.className = "text-[11px] text-blue-400 text-center mt-1";
+      statusText.classList.remove("hidden");
+
+      try {
+        const payload = {};
+        if (currentCaptchaContext === "job" && activeJobId) {
+          payload.job_id = activeJobId;
+        } else {
+          payload.user_id = document.getElementById("srm-userid").value.trim();
+          payload.password = document.getElementById("srm-password").value;
+        }
+
+        const res = await fetch("/api/v1/srm/auth/launch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || "Failed to launch login browser");
+        }
+
+        // Poll status
+        if (activeBrowserPoller) clearInterval(activeBrowserPoller);
+        activeBrowserPoller = setInterval(async () => {
+          try {
+            const queryParam = payload.job_id ? `job_id=${payload.job_id}` : `request_id=discovery:${payload.user_id}`;
+            const sRes = await fetch(`/api/v1/srm/auth/status?${queryParam}`);
+            if (!sRes.ok) return;
+            const sData = await sRes.json();
+
+            if (sData.phase === "OPENING_BROWSER") {
+              btnText.textContent = "Opening Chromium Window...";
+              statusText.textContent = "Launching browser on your desktop...";
+              statusText.className = "text-[11px] text-blue-400 text-center mt-1";
+            } else if (sData.phase === "WAITING_FOR_CAPTCHA") {
+              if (sData.browser_confirmed) {
+                btnText.textContent = "Browser Open – Solve CAPTCHA";
+                btn.className = "w-full py-2.5 px-4 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-xs flex items-center justify-center gap-2 pulse-dot transition";
+                statusText.textContent = "Please solve the visual CAPTCHA in the opened Chromium window.";
+                statusText.className = "text-[11px] text-amber-400 text-center mt-1 font-semibold";
+              }
+            } else if (sData.phase === "AUTHENTICATED") {
+              clearInterval(activeBrowserPoller);
+              btnText.textContent = "Authentication Successful!";
+              btn.className = "w-full py-2.5 px-4 rounded-lg bg-emerald-600 text-white font-medium text-xs flex items-center justify-center gap-2";
+              statusText.textContent = "Session captured. Continuing workflow...";
+              statusText.className = "text-[11px] text-emerald-400 text-center mt-1 font-semibold";
+              setTimeout(() => {
+                hideCaptchaModal();
+                if (currentCaptchaContext === "job" && activeJobId) {
+                  pollJobStatus(activeJobId);
+                } else {
+                  const discBtn = document.getElementById("discover-btn");
+                  if (discBtn) discBtn.click();
+                }
+              }, 1200);
+            } else if (sData.phase === "AUTHENTICATION_ERROR" || sData.phase === "TIMED_OUT") {
+              clearInterval(activeBrowserPoller);
+              btn.disabled = false;
+              btnText.textContent = "Retry Opening Browser";
+              btn.className = "w-full py-2.5 px-4 rounded-lg bg-red-600 hover:bg-red-500 text-white font-medium text-xs flex items-center justify-center gap-2 transition";
+              statusText.textContent = "Launch failed: " + (sData.error_message || sData.message);
+              statusText.className = "text-[11px] text-red-400 text-center mt-1";
+              showCaptchaError(sData.error_message || sData.message);
+            }
+          } catch (pollErr) {
+            console.warn("Auth poll failed:", pollErr);
+          }
+        }, 1000);
+
+      } catch (err) {
+        btn.disabled = false;
+        btnText.textContent = "Open Interactive Login Browser";
+        btn.className = "w-full py-2.5 px-4 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center justify-center gap-2 transition";
+        statusText.textContent = "Error: " + err.message;
+        statusText.className = "text-[11px] text-red-400 text-center mt-1";
+        showCaptchaError(err.message);
+      }
+    }
+
 
     function showCaptchaModal(challenge, resolver, context = "job") {
       if (isSubmittingCaptcha) return;
@@ -1233,7 +1489,7 @@
 
     // Helper to determine if a job is genuinely active (not an orphaned/stale job)
     function isGenuinelyActive(job) {
-      if (!job || !job.status) return false;
+      if (!job || !job.status || job.status === "FAILED" || job.status === "COMPLETED") return false;
       const ageMs = job.created_at ? (Date.now() - new Date(job.created_at).getTime()) : Infinity;
       if (job.status === "AWAITING_USER_REVIEW") return true; // Review state persists until explicit user submission
       if (job.status === "SUBMITTING" || job.status === "VERIFYING") return ageMs < 600000;
