@@ -36,6 +36,7 @@ class Job(Base):
     semester_id = Column(String(50), nullable=True)
     subject_id = Column(String(100), nullable=True)
     worksheet_id = Column(String(100), nullable=True)
+    uploaded_file_path = Column(String(500), nullable=True)
 
     # Execution transport metadata
     transport_mode = Column(String(20), default="auto", nullable=False)  # "http", "browser", "auto"
@@ -67,6 +68,7 @@ class Job(Base):
             "semester_id": self.semester_id,
             "subject_id": self.subject_id,
             "worksheet_id": self.worksheet_id,
+            "uploaded_file_path": self.uploaded_file_path,
             "transport_mode": self.transport_mode,
             "current_step": self.current_step,
             "captcha_challenge": self.captcha_challenge,

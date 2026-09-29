@@ -89,6 +89,9 @@ export interface JobResponse {
     review_ready_at?: string;
     submission_started_at?: string;
     submission_verified_at?: string;
+    source_type?: string;
+    is_user_provided?: boolean;
+    user_provided_file?: string;
   };
   error_message?: string;
   created_at: string;
@@ -103,6 +106,9 @@ export interface JobResponse {
   answers_count?: number;
   submission_started_at?: string;
   submission_verified_at?: string;
+  uploaded_file_path?: string;
+  source_type?: string;
+  is_user_provided?: boolean;
 }
 
 export async function checkDriveStatus(): Promise<GoogleDriveStatus> {
@@ -183,6 +189,29 @@ export async function resumeSRMDiscovery(
   return res.json();
 }
 
+export interface WorksheetUploadResponse {
+  upload_id: string;
+  original_filename: string;
+  stored_path: string;
+  file_size: number;
+  format: string;
+  created_at: string;
+}
+
+export async function uploadWorksheetFile(file: File): Promise<WorksheetUploadResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`${API_BASE}/worksheets/upload`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || "Worksheet upload failed");
+  }
+  return res.json();
+}
+
 export async function createJob(params: {
   user_id: string;
   course_id: string;
@@ -192,6 +221,9 @@ export async function createJob(params: {
   slo?: number;
   transport_mode?: string;
   credentials: { USER_ID: string; PASSWORD: string };
+  uploaded_file_path?: string;
+  upload_id?: string;
+  is_user_provided?: boolean;
 }): Promise<JobResponse> {
   const res = await fetch(`${API_BASE}/jobs`, {
     method: "POST",

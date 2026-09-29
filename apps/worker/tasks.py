@@ -395,9 +395,30 @@ async def _run_job_workflow(
 
             job_temp_dir = Path(tempfile.mkdtemp(prefix=f"srm_job_{job.id[:8]}_"))
             downloaded_file: Optional[Path] = None
+            source_type = "SRM_OFFICIAL"
+
+            # Check if user provided their own worksheet
+            user_provided_path_str = getattr(job, "uploaded_file_path", None) or (credentials or {}).get("uploaded_file_path")
+            if user_provided_path_str:
+                user_path = Path(user_provided_path_str)
+                if not user_path.exists() or not user_path.is_file():
+                    raise WorksheetNotFound(f"User-provided worksheet not found at {user_provided_path_str}")
+
+                # Copy to isolated job_temp_dir to guarantee original uploaded file is never modified
+                source_type = "USER_PROVIDED"
+                import shutil
+                staged_user_file = job_temp_dir / f"source_{user_path.name}"
+                shutil.copy2(user_path, staged_user_file)
+                downloaded_file = staged_user_file
+                logger.info(
+                    "User-provided worksheet loaded for job %s from %s (staged to %s). Sourced as USER_PROVIDED.",
+                    job.id,
+                    user_path,
+                    downloaded_file,
+                )
 
             # Idempotency check: see if already downloaded in previous run
-            if job.result and (job.result.get("original_file_path") or job.result.get("original_file")):
+            if downloaded_file is None and job.result and (job.result.get("original_file_path") or job.result.get("original_file")):
                 cand_str = job.result.get("original_file_path") or job.result.get("original_file")
                 cand = Path(cand_str)
                 if cand.exists() and cand.is_file():
@@ -631,6 +652,9 @@ async def _run_job_workflow(
                 "session": session_num,
                 "slo": slo_num,
                 "batch_id": batch_id,
+                "source_type": source_type,
+                "is_user_provided": bool(source_type == "USER_PROVIDED"),
+                "user_provided_file": str(Path(user_provided_path_str).name) if user_provided_path_str else None,
                 "original_file": str(downloaded_file.name),
                 "original_file_path": str(downloaded_file.resolve()),
                 "completed_file": str(completed_file.name),
@@ -690,6 +714,8 @@ async def _run_job_workflow(
                     "session": session_num,
                     "slo": slo_num,
                     "worksheet_id": getattr(job, "worksheet_id", None) or f"{session_num}{slo_num}",
+                    "source_type": source_type,
+                    "is_user_provided": bool(source_type == "USER_PROVIDED"),
                     "is_available": False,
                     "review_ready": False,
                     "submission_allowed": False,

@@ -81,6 +81,14 @@ def create_job(job_in: JobCreate, db: Session = Depends(get_db)):
                     headers={"X-Existing-Job-Id": existing_active.id},
                 )
 
+    if job_in.uploaded_file_path:
+        up_p = Path(job_in.uploaded_file_path)
+        if not up_p.exists() or not up_p.is_file():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Specified uploaded worksheet file was not found on server: {job_in.uploaded_file_path}",
+            )
+
     try:
         new_job = Job(
             user_id=job_in.user_id,
@@ -88,6 +96,7 @@ def create_job(job_in: JobCreate, db: Session = Depends(get_db)):
             semester_id=job_in.semester_id,
             subject_id=job_in.subject_id,
             worksheet_id=job_in.worksheet_id,
+            uploaded_file_path=str(job_in.uploaded_file_path) if job_in.uploaded_file_path else None,
             transport_mode=job_in.transport_mode or "auto",
             status=JobStatus.PENDING,
             current_step="queued",
@@ -110,6 +119,9 @@ def create_job(job_in: JobCreate, db: Session = Depends(get_db)):
         creds["requested_session"] = job_in.session
     if job_in.slo is not None:
         creds["requested_slo"] = job_in.slo
+    if job_in.uploaded_file_path:
+        creds["uploaded_file_path"] = str(job_in.uploaded_file_path)
+        creds["is_user_provided"] = True
 
     # Auto-attach active auth session if already authenticated (e.g. from discovery)
     cached_session = auth_manager._sessions.get(job_in.user_id)

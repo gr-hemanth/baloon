@@ -123,9 +123,14 @@ class PhysicalDocumentVerifier:
         duplicate_count = 0
 
         # Scan original document text to avoid false positives on synthesized question text
-        orig_doc = docx.Document(str(original_path))
-        orig_para_texts = [p.text.strip() for p in orig_doc.paragraphs if p.text.strip()]
-        orig_cell_texts = [c.text.strip() for t in orig_doc.tables for r in t.rows for c in r.cells if c.text.strip()]
+        is_orig_pdf = original_path.suffix.lower() == ".pdf"
+        if not is_orig_pdf:
+            orig_doc = docx.Document(str(original_path))
+            orig_para_texts = [p.text.strip() for p in orig_doc.paragraphs if p.text.strip()]
+            orig_cell_texts = [c.text.strip() for t in orig_doc.tables for r in t.rows for c in r.cells if c.text.strip()]
+        else:
+            orig_para_texts = []
+            orig_cell_texts = []
 
         # Scan all document text (paragraphs and table cells)
         all_para_texts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]

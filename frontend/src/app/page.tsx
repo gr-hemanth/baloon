@@ -16,6 +16,8 @@ import {
   getJobDownloadUrl,
   getStatusUI,
   STATUS_UI_MAP,
+  uploadWorksheetFile,
+  WorksheetUploadResponse,
   CourseItem,
   WorksheetItem,
   JobResponse,
@@ -223,14 +225,53 @@ export default function DashboardPage() {
     }
   };
 
+  // User Provided Worksheet State
+  const [uploadedWorksheet, setUploadedWorksheet] = useState<WorksheetUploadResponse | null>(null);
+  const [isUploadingWorksheet, setIsUploadingWorksheet] = useState(false);
+  const [worksheetUploadError, setWorksheetUploadError] = useState<string | null>(null);
+
+  const handleWorksheetUpload = async (e: React.ChangeEvent<HTMLInputElement>, sampleWs: any) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 15 * 1024 * 1024) {
+      setWorksheetUploadError("File exceeds maximum allowed size of 15 MB.");
+      return;
+    }
+
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (ext !== 'docx' && ext !== 'pdf') {
+      setWorksheetUploadError("Unsupported format. Only .docx and .pdf worksheets are accepted.");
+      return;
+    }
+
+    setIsUploadingWorksheet(true);
+    setWorksheetUploadError(null);
+    try {
+      const data = await uploadWorksheetFile(file);
+      setUploadedWorksheet(data);
+      setSelectedWorksheet({
+        ...sampleWs,
+        is_available: true,
+        title: `User Uploaded (${data.original_filename})`,
+        filename: data.original_filename,
+      } as any);
+    } catch (err: any) {
+      setWorksheetUploadError(err.message || "Failed to upload worksheet");
+      setUploadedWorksheet(null);
+    } finally {
+      setIsUploadingWorksheet(false);
+    }
+  };
+
   // Start Automation Job
   const handleStartJob = async () => {
-    if (!selectedCourseCode || !selectedWorksheet || !selectedWorksheet.is_available) return;
+    if (!selectedCourseCode || !selectedWorksheet || (!selectedWorksheet.is_available && !uploadedWorksheet)) return;
     setIsStartingJob(true);
     setJobError(null);
     try {
       const wsId = selectedWorksheet.worksheet_id || `${selectedWorksheet.session}${selectedWorksheet.slo}`;
-      const job = await createJob({
+      const params: any = {
         user_id: userId,
         course_id: selectedCourseCode,
         semester_id: String(semester),
@@ -239,7 +280,13 @@ export default function DashboardPage() {
         slo: selectedWorksheet.slo,
         transport_mode: transportMode,
         credentials: { USER_ID: userId, PASSWORD: password },
-      });
+      };
+      if (uploadedWorksheet && uploadedWorksheet.stored_path) {
+        params.uploaded_file_path = uploadedWorksheet.stored_path;
+        params.upload_id = uploadedWorksheet.upload_id;
+        params.is_user_provided = true;
+      }
+      const job = await createJob(params);
       setAndStoreActiveJob(job);
       if (job.status === "WAITING_FOR_CAPTCHA") {
         setCaptchaContext("job");
@@ -632,6 +679,8 @@ export default function DashboardPage() {
                     onChange={(e) => {
                       setSelectedCourseCode(e.target.value);
                       setSelectedWorksheet(null);
+                      setUploadedWorksheet(null);
+                      setWorksheetUploadError(null);
                     }}
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
                   >
@@ -648,7 +697,7 @@ export default function DashboardPage() {
 
                 <div>
                   <label className="block text-slate-300 font-medium mb-1">Available Worksheets</label>
-                  <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
                     {(() => {
                       if (!currentCourse) {
                         return <p className="text-slate-500 italic">Select a course to view available worksheets.</p>;
@@ -656,28 +705,78 @@ export default function DashboardPage() {
                       const allWs = currentCourse.worksheets || [];
                       const availableWs = allWs.filter((w) => w.is_available);
                       const unavailableWs = allWs.filter((w) => !w.is_available);
-                      const sampleWs = unavailableWs[0] || { session: "N/A", slo: "N/A", worksheet_id: "N/A" };
+                      const sampleWs = unavailableWs[0] || { session: 1, slo: 1, worksheet_id: "1011" };
 
                       if (availableWs.length === 0) {
                         return (
-                          <div className="p-3.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 space-y-2.5">
-                            <div className="flex items-center gap-2 text-amber-400 font-semibold text-xs">
-                              <span>⚠️</span>
-                              <span>No official SRM worksheet is available for this course/session.</span>
+                          <div className="space-y-3">
+                            <div className="p-3.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 space-y-2">
+                              <div className="flex items-center gap-2 text-amber-400 font-semibold text-xs">
+                                <span>⚠️</span>
+                                <span>No official SRM worksheet is available for this course/session.</span>
+                              </div>
+                              <p className="text-[11px] text-slate-300">
+                                The course coordinator has not uploaded official worksheets to the SRM portal for <strong className="text-white font-mono">{currentCourse.course_code}</strong>.
+                              </p>
+                              <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5 space-y-1.5 font-mono text-[11px]">
+                                <div className="flex justify-between"><span className="text-slate-400">Course:</span> <span className="text-white font-bold">{currentCourse.course_code}</span></div>
+                                <div className="flex justify-between"><span className="text-slate-400">Session:</span> <span className="text-white font-bold">{sampleWs.session}</span></div>
+                                <div className="flex justify-between"><span className="text-slate-400">SLO:</span> <span className="text-white font-bold">{sampleWs.slo}</span></div>
+                                <div className="flex justify-between"><span className="text-slate-400">Worksheet ID:</span> <span className="text-white font-bold">{sampleWs.worksheet_id || `${sampleWs.session}${sampleWs.slo}`}</span></div>
+                                <div className="flex justify-between"><span className="text-slate-400">Availability:</span> <span className="text-rose-400 font-bold uppercase">UNAVAILABLE</span></div>
+                              </div>
+                              <p className="text-[10px] text-slate-400 italic">
+                                Synthetic questions are never fabricated. You may upload your authentic worksheet document below to automate this session.
+                              </p>
                             </div>
-                            <p className="text-[11px] text-slate-300">
-                              The course coordinator has not uploaded official worksheets to the SRM portal for <strong className="text-white font-mono">{currentCourse.course_code}</strong>.
-                            </p>
-                            <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5 space-y-1.5 font-mono text-[11px]">
-                              <div className="flex justify-between"><span className="text-slate-400">Course:</span> <span className="text-white font-bold">{currentCourse.course_code}</span></div>
-                              <div className="flex justify-between"><span className="text-slate-400">Session:</span> <span className="text-white font-bold">{sampleWs.session}</span></div>
-                              <div className="flex justify-between"><span className="text-slate-400">SLO:</span> <span className="text-white font-bold">{sampleWs.slo}</span></div>
-                              <div className="flex justify-between"><span className="text-slate-400">Worksheet ID:</span> <span className="text-white font-bold">{sampleWs.worksheet_id || `${sampleWs.session}${sampleWs.slo}`}</span></div>
-                              <div className="flex justify-between"><span className="text-slate-400">Availability:</span> <span className="text-rose-400 font-bold uppercase">UNAVAILABLE</span></div>
+
+                            {/* Upload Worksheet Section */}
+                            <div className="p-3.5 rounded-lg bg-slate-900 border border-slate-700/80 space-y-2.5">
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs font-semibold text-white flex items-center gap-1.5">
+                                  <span>☁️</span> Upload Actual Worksheet
+                                </span>
+                                <span className="text-[10px] text-slate-400 font-mono">DOCX / PDF &bull; MAX 15MB</span>
+                              </div>
+                              <p className="text-[11px] text-slate-400">
+                                Provide your authentic course worksheet to parse, answer with AI, and upload for review.
+                              </p>
+                              <label className="block border-2 border-dashed border-slate-700 hover:border-blue-500 rounded-lg p-3 text-center cursor-pointer transition">
+                                <input
+                                  type="file"
+                                  accept=".docx,.pdf"
+                                  className="hidden"
+                                  disabled={isUploadingWorksheet}
+                                  onChange={(e) => handleWorksheetUpload(e, sampleWs)}
+                                />
+                                <div className="text-xs text-slate-300 font-medium">
+                                  {isUploadingWorksheet ? "Uploading and validating..." : "Click to select or drop worksheet"}
+                                </div>
+                                <div className="text-[10px] text-slate-500">Supports authentic .docx or .pdf files</div>
+                              </label>
+
+                              {worksheetUploadError && (
+                                <div className="p-2 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-xs flex items-center gap-1.5">
+                                  <span>❌</span>
+                                  <span>{worksheetUploadError}</span>
+                                </div>
+                              )}
+
+                              {uploadedWorksheet && (
+                                <div className="p-2.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs space-y-1">
+                                  <div className="flex items-center justify-between font-semibold">
+                                    <span className="flex items-center gap-1 text-emerald-400">
+                                      <span>✅</span> Worksheet Validated & Ready
+                                    </span>
+                                    <span className="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px] font-mono uppercase">{uploadedWorksheet.format}</span>
+                                  </div>
+                                  <div className="text-[11px] text-slate-300 flex justify-between font-mono">
+                                    <span className="truncate max-w-[200px]" title={uploadedWorksheet.original_filename}>{uploadedWorksheet.original_filename}</span>
+                                    <span className="text-slate-400">{(uploadedWorksheet.file_size / 1024).toFixed(1)} KB</span>
+                                  </div>
+                                </div>
+                              )}
                             </div>
-                            <p className="text-[10px] text-slate-400 italic">
-                              Worksheets unavailable on SRM cannot be automated. Synthetic questions are never fabricated.
-                            </p>
                           </div>
                         );
                       }
@@ -692,7 +791,10 @@ export default function DashboardPage() {
                             return (
                               <div
                                 key={ws.worksheet_id || `${ws.session}-${ws.slo}`}
-                                onClick={() => setSelectedWorksheet(ws)}
+                                onClick={() => {
+                                  setSelectedWorksheet(ws);
+                                  setUploadedWorksheet(null);
+                                }}
                                 className={`flex items-center justify-between p-2.5 rounded-lg border cursor-pointer transition ${
                                   isSelected
                                     ? "bg-emerald-950/40 border-emerald-500"
@@ -703,7 +805,10 @@ export default function DashboardPage() {
                                   <input
                                     type="radio"
                                     checked={isSelected || false}
-                                    onChange={() => setSelectedWorksheet(ws)}
+                                    onChange={() => {
+                                      setSelectedWorksheet(ws);
+                                      setUploadedWorksheet(null);
+                                    }}
                                     className="text-emerald-500"
                                   />
                                   <div>
@@ -729,7 +834,7 @@ export default function DashboardPage() {
                                 <span>🚫</span>
                                 <span>Unavailable on SRM ({unavailableWs.length} not uploaded by coordinator)</span>
                               </div>
-                              <p className="text-[10px] text-slate-500 italic">These worksheets are not available on the portal and cannot be automated.</p>
+                              <p className="text-[10px] text-slate-500 italic">These worksheets are not available on the portal and cannot be automated without user upload.</p>
                             </div>
                           )}
                         </>
@@ -741,10 +846,14 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   onClick={handleStartJob}
-                  disabled={!selectedWorksheet || !selectedWorksheet.is_available || isStartingJob}
+                  disabled={!selectedWorksheet || (!selectedWorksheet.is_available && !uploadedWorksheet) || isStartingJob}
                   className="w-full py-2.5 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-sm transition disabled:opacity-50"
                 >
-                  {isStartingJob ? "Starting Background Task..." : "Start Background Automation"}
+                  {isStartingJob
+                    ? "Starting Background Task..."
+                    : uploadedWorksheet
+                    ? "Start Automation (Uploaded Worksheet)"
+                    : "Start Background Automation"}
                 </button>
               </div>
             </div>
@@ -863,7 +972,7 @@ export default function DashboardPage() {
                   </span>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 p-3 rounded-lg bg-slate-900/80 border border-slate-800">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3 rounded-lg bg-slate-900/80 border border-slate-800">
                   <div>
                     <span className="text-slate-400 block text-[11px] mb-0.5">Worksheet:</span>
                     <span className="text-white font-medium text-xs">
@@ -874,6 +983,16 @@ export default function DashboardPage() {
                     <span className="text-slate-400 block text-[11px] mb-0.5">Questions Answered:</span>
                     <span className="text-emerald-400 font-medium text-xs">
                       {(activeJob.answers_count ?? activeJob.result?.answers_count ?? "--")} / {(activeJob.questions_count ?? activeJob.result?.questions_count ?? "--")}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 block text-[11px] mb-0.5">Document Source:</span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${
+                      (activeJob.is_user_provided || activeJob.result?.is_user_provided || activeJob.source_type === "USER_PROVIDED")
+                        ? "bg-purple-500/10 text-purple-300 border-purple-500/20"
+                        : "bg-blue-500/10 text-blue-300 border-blue-500/20"
+                    }`}>
+                      {(activeJob.is_user_provided || activeJob.result?.is_user_provided || activeJob.source_type === "USER_PROVIDED") ? "USER PROVIDED" : "SRM OFFICIAL"}
                     </span>
                   </div>
                 </div>

@@ -15,6 +15,18 @@ class JobCreate(BaseModel):
     transport_mode: Optional[str] = "auto"  # "http", "browser", "auto"
     credentials: Optional[Dict[str, Any]] = None  # Ephemeral user credentials, never persisted to DB
     force: Optional[bool] = False  # If True, bypasses active duplicate check
+    uploaded_file_path: Optional[str] = None
+    upload_id: Optional[str] = None
+    is_user_provided: Optional[bool] = False
+
+
+class WorksheetUploadResponse(BaseModel):
+    upload_id: str
+    original_filename: str
+    stored_path: str
+    file_size: int
+    format: str
+    created_at: str
 
 
 class JobSubmitRequest(BaseModel):
@@ -84,6 +96,7 @@ class JobResponse(BaseModel):
     semester_id: Optional[str] = None
     subject_id: Optional[str] = None
     worksheet_id: Optional[str] = None
+    uploaded_file_path: Optional[str] = None
     transport_mode: str
     current_step: Optional[str] = None
     captcha_challenge: Optional[Dict[str, Any]] = None
@@ -91,6 +104,22 @@ class JobResponse(BaseModel):
     error_message: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+    @computed_field
+    @property
+    def source_type(self) -> str:
+        """Indicates whether worksheet was sourced from SRM portal or provided by user."""
+        if self.result and self.result.get("source_type"):
+            return str(self.result.get("source_type"))
+        if self.uploaded_file_path:
+            return "USER_PROVIDED"
+        return "SRM_OFFICIAL"
+
+    @computed_field
+    @property
+    def is_user_provided(self) -> bool:
+        """True if the worksheet was uploaded/provided by the user."""
+        return self.source_type == "USER_PROVIDED"
 
     @computed_field
     @property

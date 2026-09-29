@@ -20,6 +20,7 @@ from apps.api.routes.health import router as health_router
 from apps.api.routes.jobs import router as jobs_router
 from apps.api.routes.auth import router as auth_router
 from apps.api.routes.srm import router as srm_router
+from apps.api.routes.worksheets import router as worksheets_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("srm_api")
@@ -74,6 +75,10 @@ app.include_router(auth_router, prefix=settings.API_V1_STR)
 # SRM Discovery routes
 app.include_router(srm_router)
 app.include_router(srm_router, prefix=settings.API_V1_STR)
+
+# Worksheet Upload routes
+app.include_router(worksheets_router)
+app.include_router(worksheets_router, prefix=settings.API_V1_STR)
 
 
 @app.get("/dashboard", response_class=FileResponse, include_in_schema=False)

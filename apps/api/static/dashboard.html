@@ -337,7 +337,7 @@
           </div>
 
           <div class="space-y-4 text-xs">
-            <div class="grid grid-cols-2 gap-3 p-3 rounded-lg bg-slate-900/80 border border-slate-800">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3 rounded-lg bg-slate-900/80 border border-slate-800">
               <div>
                 <span class="text-slate-400 block text-[11px] mb-0.5">Worksheet:</span>
                 <span id="review-ws-title" class="text-white font-medium text-xs">--</span>
@@ -345,6 +345,10 @@
               <div>
                 <span class="text-slate-400 block text-[11px] mb-0.5">Questions Answered:</span>
                 <span id="review-q-count" class="text-emerald-400 font-medium text-xs">--</span>
+              </div>
+              <div>
+                <span class="text-slate-400 block text-[11px] mb-0.5">Document Source:</span>
+                <span id="review-source-badge" class="px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 text-[10px] font-mono font-bold">SRM OFFICIAL</span>
               </div>
             </div>
 
@@ -531,6 +535,7 @@
     let pollInterval = null;
     let discoveredCourses = [];
     let selectedWorksheetData = null;
+    let userUploadedWorksheet = null;
 
     // Check Google Drive connection status on load
     async function checkDriveStatus() {
@@ -832,7 +837,10 @@
       const container = document.getElementById("worksheets-container");
       container.innerHTML = "";
       selectedWorksheetData = null;
-      document.getElementById("start-job-btn").disabled = true;
+      userUploadedWorksheet = null;
+      const startBtn = document.getElementById("start-job-btn");
+      startBtn.disabled = true;
+      startBtn.innerHTML = `<i class="fa-solid fa-play"></i> <span>Start Background Automation</span>`;
 
       if (!course) {
         container.innerHTML = `<p class="text-xs text-slate-500 italic">Select a course to view available worksheets.</p>`;
@@ -844,26 +852,51 @@
       const unavailableWs = allWs.filter(w => !w.is_available);
 
       if (availableWs.length === 0) {
-        const sampleWs = unavailableWs[0] || { session: "N/A", slo: "N/A", worksheet_id: "N/A" };
+        const sampleWs = unavailableWs[0] || { session: 1, slo: 1, worksheet_id: "1011" };
         container.innerHTML = `
-          <div class="p-3.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 space-y-2.5">
-            <div class="flex items-center gap-2 text-amber-400 font-semibold text-xs">
-              <i class="fa-solid fa-triangle-exclamation text-sm"></i>
-              <span>No official SRM worksheet is available for this course/session.</span>
+          <div class="space-y-3">
+            <div class="p-3.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 space-y-2">
+              <div class="flex items-center gap-2 text-amber-400 font-semibold text-xs">
+                <i class="fa-solid fa-triangle-exclamation text-sm"></i>
+                <span>No official SRM worksheet is available for this course/session.</span>
+              </div>
+              <p class="text-[11px] text-slate-300">
+                The course coordinator has not uploaded official worksheets to the SRM portal for <strong class="text-white">${course.course_code}</strong>.
+              </p>
+              <div class="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5 space-y-1.5 font-mono text-[11px]">
+                <div class="flex justify-between"><span class="text-slate-400">Course:</span> <span class="text-white font-bold">${course.course_code}</span></div>
+                <div class="flex justify-between"><span class="text-slate-400">Session:</span> <span class="text-white font-bold">${sampleWs.session}</span></div>
+                <div class="flex justify-between"><span class="text-slate-400">SLO:</span> <span class="text-white font-bold">${sampleWs.slo}</span></div>
+                <div class="flex justify-between"><span class="text-slate-400">Worksheet ID:</span> <span class="text-white font-bold">${sampleWs.worksheet_id || `${sampleWs.session}${sampleWs.slo}`}</span></div>
+                <div class="flex justify-between"><span class="text-slate-400">Availability:</span> <span class="text-rose-400 font-bold uppercase">UNAVAILABLE</span></div>
+              </div>
+              <p class="text-[10px] text-slate-400 italic">
+                Synthetic questions are never fabricated. You may upload your actual lab or practice worksheet below to proceed.
+              </p>
             </div>
-            <p class="text-[11px] text-slate-300">
-              The course coordinator has not uploaded official worksheets to the SRM portal for <strong class="text-white">${course.course_code}</strong>.
-            </p>
-            <div class="rounded-lg bg-slate-900/90 border border-slate-800 p-2.5 space-y-1.5 font-mono text-[11px]">
-              <div class="flex justify-between"><span class="text-slate-400">Course:</span> <span class="text-white font-bold">${course.course_code}</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Session:</span> <span class="text-white font-bold">${sampleWs.session}</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">SLO:</span> <span class="text-white font-bold">${sampleWs.slo}</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Worksheet ID:</span> <span class="text-white font-bold">${sampleWs.worksheet_id || `${sampleWs.session}${sampleWs.slo}`}</span></div>
-              <div class="flex justify-between"><span class="text-slate-400">Availability:</span> <span class="text-rose-400 font-bold uppercase">UNAVAILABLE</span></div>
+
+            <!-- User Upload Area -->
+            <div class="p-3.5 rounded-lg bg-slate-900/90 border border-slate-700/80 space-y-2.5">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-semibold text-white flex items-center gap-1.5">
+                  <i class="fa-solid fa-cloud-arrow-up text-blue-400"></i>
+                  Upload Actual Worksheet
+                </span>
+                <span class="text-[10px] text-slate-400 font-mono">DOCX / PDF &bull; MAX 15MB</span>
+              </div>
+              <p class="text-[11px] text-slate-400">
+                Provide your course worksheet document to parse, solve with AI, and upload for review.
+              </p>
+              <div id="drop-zone" onclick="document.getElementById('ws-file-input').click()"
+                class="border-2 border-dashed border-slate-700 hover:border-blue-500 hover:bg-slate-800/40 rounded-lg p-3.5 text-center cursor-pointer transition">
+                <input type="file" id="ws-file-input" accept=".docx,.pdf" class="hidden"
+                  onchange="handleWorksheetFileSelected(event, '${course.course_code}', ${sampleWs.session}, ${sampleWs.slo})" />
+                <i class="fa-solid fa-file-arrow-up text-xl text-blue-400/80 mb-1"></i>
+                <div class="text-xs text-slate-300 font-medium">Click to select or drop worksheet</div>
+                <div class="text-[10px] text-slate-500">Supports authentic DOCX or PDF</div>
+              </div>
+              <div id="upload-status-box" class="hidden"></div>
             </div>
-            <p class="text-[10px] text-slate-400 italic">
-              Worksheets unavailable on SRM cannot be automated. Synthetic questions are never fabricated.
-            </p>
           </div>
         `;
         return;
@@ -891,7 +924,9 @@
         div.onclick = () => {
           div.querySelector("input").checked = true;
           selectedWorksheetData = { ...ws, course_code: course.course_code };
-          document.getElementById("start-job-btn").disabled = false;
+          userUploadedWorksheet = null;
+          startBtn.disabled = false;
+          startBtn.innerHTML = `<i class="fa-solid fa-play"></i> <span>Start Background Automation</span>`;
         };
 
         container.appendChild(div);
@@ -906,17 +941,126 @@
             <i class="fa-solid fa-ban text-rose-400 text-xs"></i>
             <span>Unavailable on SRM (${unavailableWs.length} not uploaded by coordinator)</span>
           </div>
-          <p class="text-[10px] text-slate-500 italic mb-2">These worksheets are not available on the portal and cannot be automated.</p>
+          <p class="text-[10px] text-slate-500 italic mb-2">These worksheets are not available on the portal and cannot be automated without user upload.</p>
         `;
         container.appendChild(unDiv);
+      }
+    }
+
+    async function handleWorksheetFileSelected(e, courseCode, session, slo) {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+
+      const uploadStatusEl = document.getElementById("upload-status-box");
+      uploadStatusEl.classList.remove("hidden");
+      uploadStatusEl.innerHTML = `
+        <div class="p-2.5 rounded bg-blue-500/10 border border-blue-500/30 text-blue-300 text-xs flex items-center gap-2">
+          <i class="fa-solid fa-spinner fa-spin"></i>
+          <span>Uploading and validating ${file.name}...</span>
+        </div>
+      `;
+
+      if (file.size > 15 * 1024 * 1024) {
+        uploadStatusEl.innerHTML = `
+          <div class="p-2.5 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-xs flex items-center gap-2">
+            <i class="fa-solid fa-circle-exclamation text-red-400"></i>
+            <span>File exceeds maximum allowed size of 15 MB.</span>
+          </div>
+        `;
+        return;
+      }
+
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (ext !== 'docx' && ext !== 'pdf') {
+        uploadStatusEl.innerHTML = `
+          <div class="p-2.5 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-xs flex items-center gap-2">
+            <i class="fa-solid fa-circle-exclamation text-red-400"></i>
+            <span>Unsupported format. Only .docx and .pdf worksheets are accepted.</span>
+          </div>
+        `;
+        return;
+      }
+
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const resp = await fetch("/api/v1/worksheets/upload", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!resp.ok) {
+          let errDetail = "Upload failed";
+          try {
+            const err = await resp.json();
+            errDetail = err.detail || errDetail;
+          } catch {
+            errDetail = await resp.text();
+          }
+          uploadStatusEl.innerHTML = `
+            <div class="p-2.5 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-xs flex items-center gap-2">
+              <i class="fa-solid fa-circle-exclamation text-red-400"></i>
+              <span>${errDetail}</span>
+            </div>
+          `;
+          userUploadedWorksheet = null;
+          document.getElementById("start-job-btn").disabled = true;
+          return;
+        }
+
+        const data = await resp.json();
+        userUploadedWorksheet = data;
+        const sizeKb = (data.file_size / 1024).toFixed(1);
+        const fmtUpper = data.format.toUpperCase();
+
+        uploadStatusEl.innerHTML = `
+          <div class="p-2.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs space-y-1">
+            <div class="flex items-center justify-between font-semibold">
+              <span class="flex items-center gap-1.5 text-emerald-400">
+                <i class="fa-solid fa-circle-check"></i> Worksheet Validated & Ready
+              </span>
+              <span class="px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px] font-mono">${fmtUpper}</span>
+            </div>
+            <div class="text-[11px] text-slate-300 flex justify-between font-mono">
+              <span class="truncate max-w-[200px]" title="${data.original_filename}">${data.original_filename}</span>
+              <span class="text-slate-400">${sizeKb} KB</span>
+            </div>
+          </div>
+        `;
+
+        selectedWorksheetData = {
+          course_code: courseCode,
+          session: session,
+          slo: slo,
+          worksheet_id: `${session}${slo}`,
+          is_available: true,
+          is_user_provided: true,
+          title: `User Uploaded (${data.original_filename})`,
+          filename: data.original_filename,
+        };
+
+        const startBtn = document.getElementById("start-job-btn");
+        startBtn.disabled = false;
+        startBtn.innerHTML = `<i class="fa-solid fa-play"></i> <span>Start Automation (Uploaded Worksheet)</span>`;
+
+      } catch (err) {
+        uploadStatusEl.innerHTML = `
+          <div class="p-2.5 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-xs flex items-center gap-2">
+            <i class="fa-solid fa-circle-exclamation text-red-400"></i>
+            <span>Network error during upload: ${err.message}</span>
+          </div>
+        `;
       }
     }
 
     // Step 2: Start Job
     async function startAutomationJob() {
       if (!selectedWorksheetData || !selectedWorksheetData.is_available) {
-        alert("Cannot start job: No official SRM worksheet is available for this course/session.");
-        return;
+        if (!userUploadedWorksheet) {
+          alert("Cannot start job: No official SRM worksheet is available for this course/session.");
+          return;
+        }
       }
       const userId = document.getElementById("srm-userid").value.trim();
       const password = document.getElementById("srm-password").value;
@@ -940,6 +1084,12 @@
           transport_mode: transport,
           credentials: { USER_ID: userId, PASSWORD: password },
         };
+
+        if (userUploadedWorksheet && userUploadedWorksheet.stored_path) {
+          payload.uploaded_file_path = userUploadedWorksheet.stored_path;
+          payload.upload_id = userUploadedWorksheet.upload_id;
+          payload.is_user_provided = true;
+        }
 
         const res = await fetch("/api/v1/jobs", {
           method: "POST",
@@ -1202,6 +1352,18 @@
       const qAns = res.answers_count ?? res.questions_count ?? "--";
       const qTot = res.questions_count ?? "--";
       document.getElementById("review-q-count").textContent = `${qAns} / ${qTot}`;
+
+      const isUserProvided = job.is_user_provided || res.is_user_provided || (job.source_type === "USER_PROVIDED") || (res.source_type === "USER_PROVIDED");
+      const srcEl = document.getElementById("review-source-badge");
+      if (srcEl) {
+        if (isUserProvided) {
+          srcEl.textContent = "USER PROVIDED";
+          srcEl.className = "px-2 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 text-[10px] font-mono font-bold";
+        } else {
+          srcEl.textContent = "SRM OFFICIAL";
+          srcEl.className = "px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 text-[10px] font-mono font-bold";
+        }
+      }
 
       const driveUrl = job.drive_web_view_link || res.drive_web_url || "";
       document.getElementById("review-drive-link").value = driveUrl;

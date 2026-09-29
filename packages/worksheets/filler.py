@@ -75,7 +75,10 @@ class DocxWorksheetFiller:
         out_dir = Path(output_dir) if output_dir else orig_path.parent
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        target_name = output_filename or f"completed_{orig_path.name}"
+        is_pdf = orig_path.suffix.lower() == ".pdf"
+        target_name = output_filename or (f"completed_{orig_path.stem}.docx" if is_pdf else f"completed_{orig_path.name}")
+        if is_pdf and not target_name.lower().endswith(".docx"):
+            target_name = f"{Path(target_name).stem}.docx"
         completed_path = out_dir / target_name
 
         if completed_path.resolve() == orig_path.resolve():
@@ -84,34 +87,71 @@ class DocxWorksheetFiller:
                 "Original document must remain untouched."
             )
 
-        # Open in memory
-        doc = docx.Document(str(orig_path))
+        if is_pdf:
+            # Create a structured companion DOCX document for PDF worksheets
+            doc = docx.Document()
+            meta_table = doc.add_table(rows=2, cols=2)
+            meta_table.style = 'Table Grid'
+            student_info = getattr(self.header_filler, "student_info", {})
+            r0 = meta_table.rows[0].cells
+            r0[0].text = f"Student Name: {student_info.get('name', 'G R HEMANTH')}"
+            r0[1].text = f"Reg. No.: {student_info.get('reg_no', 'RA2511003011819')}"
+            r1 = meta_table.rows[1].cells
+            r1[0].text = f"Branch: {student_info.get('branch', 'COMPUTER SCIENCE AND ENGINEERING')}"
+            r1[1].text = f"Date: {student_info.get('date', '01-01-2026')}"
 
-        # 0. Fill Student Identification Metadata (Name, Reg. No., Branch, Date)
-        self.header_filler.fill_header(doc)
+            if worksheet.title:
+                doc.add_heading(worksheet.title, level=1)
 
-        # Process each question using generic answer-target resolution
-        for question in worksheet.questions:
-            answer = answers.get_answer(question.question_id)
-            if not answer:
-                # Try lookup by question number
-                if question.question_number:
+            for question in worksheet.questions:
+                answer = answers.get_answer(question.question_id)
+                if not answer and question.question_number:
                     answer = answers.get_answer_by_number(question.question_number)
+                if not answer:
+                    answer = GeneratedAnswer(
+                        question_id=question.question_id,
+                        question_number=question.question_number,
+                        question_type=question.question_type,
+                        answer_text="[Answer pending manual review]",
+                        confidence=0.0,
+                    )
+                qp = doc.add_paragraph()
+                q_label = f"Question {question.question_number}: " if question.question_number else ""
+                q_run = qp.add_run(f"{q_label}{question.question_text}")
+                q_run.bold = True
 
-            if not answer:
-                answer = GeneratedAnswer(
-                    question_id=question.question_id,
-                    question_number=question.question_number,
-                    question_type=question.question_type,
-                    answer_text="[Answer pending manual review]",
-                    confidence=0.0,
-                )
+                ap = doc.add_paragraph()
+                ans_run = ap.add_run(answer.answer_text)
+                ans_run.font.color.rgb = ANSWER_COLOR_RGB
+        else:
+            # Open in memory
+            doc = docx.Document(str(orig_path))
 
-            # 1. Require exactly one resolved writable target
-            target = self.resolver.resolve(doc, question, worksheet.questions)
+            # 0. Fill Student Identification Metadata (Name, Reg. No., Branch, Date)
+            self.header_filler.fill_header(doc)
 
-            # 2. Write the formatted answer into the resolved target location
-            self.writer.write(doc, target, question, answer)
+            # Process each question using generic answer-target resolution
+            for question in worksheet.questions:
+                answer = answers.get_answer(question.question_id)
+                if not answer:
+                    # Try lookup by question number
+                    if question.question_number:
+                        answer = answers.get_answer_by_number(question.question_number)
+
+                if not answer:
+                    answer = GeneratedAnswer(
+                        question_id=question.question_id,
+                        question_number=question.question_number,
+                        question_type=question.question_type,
+                        answer_text="[Answer pending manual review]",
+                        confidence=0.0,
+                    )
+
+                # 1. Require exactly one resolved writable target
+                target = self.resolver.resolve(doc, question, worksheet.questions)
+
+                # 2. Write the formatted answer into the resolved target location
+                self.writer.write(doc, target, question, answer)
 
         # Save to completed path ONLY
         doc.save(str(completed_path))

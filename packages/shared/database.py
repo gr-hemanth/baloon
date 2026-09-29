@@ -45,5 +45,19 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """Initialize database tables."""
+    """Initialize database tables and ensure schema is up to date."""
     Base.metadata.create_all(bind=engine)
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            if engine.dialect.name == "sqlite":
+                res = conn.execute(text("PRAGMA table_info(jobs)")).fetchall()
+                cols = [r[1] for r in res]
+                if cols and "uploaded_file_path" not in cols:
+                    conn.execute(text("ALTER TABLE jobs ADD COLUMN uploaded_file_path VARCHAR(500)"))
+                    conn.commit()
+            elif engine.dialect.name == "postgresql":
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS uploaded_file_path VARCHAR(500)"))
+                conn.commit()
+    except Exception as exc:
+        logger.debug("Schema migration notice: %s", exc)
