@@ -124,7 +124,7 @@ async def test_controlled_live_e2e_verification():
     try:
         # Create a fresh controlled test job
         job = Job(
-            user_id="RA2511003011819",
+            user_id=os.getenv("SRM_USER_ID", "test_student"),
             course_id="21LEM202T",
             semester_id="3",
             worksheet_id="1021",
@@ -211,7 +211,7 @@ async def test_controlled_live_e2e_verification():
         await _run_job_workflow(
             job_id=job.id,
             credentials={
-                "USER_ID": "RA2511003011819",
+                "USER_ID": os.getenv("SRM_USER_ID", "test_student"),
                 "PASSWORD": "SecretStudentPassword!",
                 "captcha_solution": "123456",
             },

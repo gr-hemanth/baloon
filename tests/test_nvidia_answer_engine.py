@@ -604,7 +604,10 @@ async def test_controlled_real_nvidia_generation():
         slo=1,
     )
 
-    result = await engine.generate_answers(ws)
+    try:
+        result = await engine.generate_answers(ws)
+    except LLMNetworkError as exc:
+        pytest.skip(f"NVIDIA live network endpoint unreachable: {exc}")
 
     assert result.provider == "nvidia"
     assert len(result.answers) == 1
