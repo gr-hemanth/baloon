@@ -17,6 +17,7 @@ from packages.srm.models import (
     SRMWorksheetFile,
     SRMWorksheetMetadata,
     SRMCourseStatus,
+    SRMAuthSession,
 )
 from packages.srm.exceptions import (
     SRMConnectionError,
@@ -146,6 +147,7 @@ class SRMHttpClient(SRMClient):
         self._jwt_token: Optional[str] = None  # Strictly in-memory
         self._user_id: Optional[str] = None
         self._user_data: Dict[str, Any] = {}
+        self.auth_session: Optional[SRMAuthSession] = None
 
     @property
     def transport_name(self) -> str:
@@ -153,7 +155,24 @@ class SRMHttpClient(SRMClient):
 
     @property
     def is_authenticated(self) -> bool:
+        if self.auth_session is not None:
+            return self.auth_session.is_valid
         return self._jwt_token is not None
+
+    def set_auth_session(self, session: SRMAuthSession) -> None:
+        """Configure HTTP client with an authenticated SRMAuthSession."""
+        if not isinstance(session, SRMAuthSession):
+            raise TypeError(f"Expected SRMAuthSession instance, got {type(session)}")
+        self.auth_session = session
+        self._jwt_token = session.access_token
+        if session.user_id:
+            self._user_id = session.user_id
+        if session.user_data:
+            self._user_data = session.user_data
+        if self._client and not self._client.is_closed and session.cookies:
+            for k, v in session.cookies.items():
+                self._client.cookies.set(k, v)
+        logger.info("Configured SRMHttpClient with authenticated session for user %s", self._user_id or "unknown")
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -166,15 +185,19 @@ class SRMHttpClient(SRMClient):
                 "Accept": "application/json, text/plain, */*",
                 "Content-Type": "application/json",
             }
+            cookies = self.auth_session.cookies if (self.auth_session and self.auth_session.cookies) else None
             self._client = httpx.AsyncClient(
                 timeout=self.timeout,
                 follow_redirects=True,
                 headers=headers,
+                cookies=cookies,
             )
         return self._client
 
     def _get_auth_headers(self) -> Dict[str, str]:
-        """Attach JWT in Authorization header if present."""
+        """Attach authorization headers from session or active JWT token."""
+        if self.auth_session and self.auth_session.is_valid:
+            return self.auth_session.get_auth_headers()
         headers = {}
         if self._jwt_token:
             headers["Authorization"] = self._jwt_token
@@ -307,6 +330,11 @@ class SRMHttpClient(SRMClient):
             self._jwt_token = token
             self._user_id = user_id
             self._user_data = data.get("user", {})
+            self.auth_session = SRMAuthSession.from_browser_capture(
+                token=token,
+                user_id=user_id,
+                user_data=self._user_data,
+            )
             logger.info("Authentication succeeded for student %s", user_id)
             return True
         else:
@@ -337,14 +365,14 @@ class SRMHttpClient(SRMClient):
         courses_data = data.get("courses", [])
         parsed_courses: List[SRMCourse] = []
         for c in courses_data:
-            course_code = c.get("COURSE_CODE", "")
-            course_name = c.get("COURSE_NAME", "")
+            course_code = c.get("COURSE_CODE") or c.get("course_code") or ""
+            course_name = c.get("COURSE_NAME") or c.get("course_name") or ""
             try:
-                sem = int(c.get("SEMESTER", 0))
+                sem = int(c.get("SEMESTER") or c.get("semester") or 0)
             except (ValueError, TypeError):
                 sem = 0
-            batch_id = c.get("BATCH_ID", "")
-            dept = c.get("DEPARTMENT")
+            batch_id = c.get("BATCH_ID") or c.get("batch_id") or ""
+            dept = c.get("DEPARTMENT") or c.get("department")
             parsed_courses.append(
                 SRMCourse(
                     course_code=course_code,
@@ -414,8 +442,8 @@ class SRMHttpClient(SRMClient):
     ) -> SRMSessionStatus:
         """Retrieve session practice status from POST /curricula/student/session/getsessionstatus."""
         target_uid = self._user_id or ""
-        target_name = full_name or self._user_data.get("FULL_NAME", "")
-        target_dept = department or self._user_data.get("DEPARTMENT", "")
+        target_name = full_name or self._user_data.get("FULL_NAME") or self._user_data.get("NAME") or ""
+        target_dept = department or self._user_data.get("DEPARTMENT") or self._user_data.get("DEPT") or ""
 
         url = f"{self.api_base_url}/curricula/student/session/getsessionstatus"
         payload = {

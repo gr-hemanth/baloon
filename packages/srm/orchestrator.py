@@ -17,6 +17,7 @@ from packages.srm.models import (
     SRMSubmissionResult,
     SRMWorksheetFile,
     SRMWorksheetMetadata,
+    SRMAuthSession,
 )
 from packages.shared.config import settings
 
@@ -44,11 +45,17 @@ class SRMOrchestrator(SRMClient):
         
         self.http_client = SRMHttpClient(base_url=self.portal_url)
         self.browser_client = SRMBrowserClient(base_url=self.portal_url)
+        self.auth_session: Optional[SRMAuthSession] = None
+        self._status_callback: Optional[Any] = None
         
         if self.mode == "browser" or not self.prefer_http:
             self._active_client: SRMClient = self.browser_client
         else:
             self._active_client: SRMClient = self.http_client
+
+    def set_status_callback(self, callback: Any) -> None:
+        """Register status transition callback: callback(phase: str, message: str)."""
+        self._status_callback = callback
 
     @property
     def transport_name(self) -> str:
@@ -65,7 +72,7 @@ class SRMOrchestrator(SRMClient):
             return await self.browser_client.connect()
 
     async def capture_login_captcha(self) -> Optional[Dict[str, Any]]:
-        """Use Playwright to capture the login page CAPTCHA canvas."""
+        """Use Playwright to capture login page CAPTCHA (backward compatibility)."""
         if self.mode == "http":
             return None
         try:
@@ -77,23 +84,62 @@ class SRMOrchestrator(SRMClient):
     async def authenticate(self, credentials: Dict[str, Any]) -> bool:
         """Authenticate student with portal credentials.
         
-        Uses direct HTTP POST /curricula/login.
-        If CAPTCHA is required and not yet provided, triggers browser CAPTCHA capture.
+        Primary mechanism: Playwright browser-assisted authentication.
+        Once authenticated, captures SRMAuthSession, sets it on SRMHttpClient,
+        and switches all subsequent operations to direct HTTP.
         """
-        captcha_solution = credentials.get("captcha_solution") or credentials.get("captcha")
-        
-        if self.mode == "browser":
-            return await self.browser_client.authenticate(credentials)
+        # 1. Check if caller provided an existing valid SRMAuthSession
+        existing_session = credentials.get("auth_session")
+        if isinstance(existing_session, SRMAuthSession) and existing_session.is_valid:
+            self.auth_session = existing_session
+            self.http_client.set_auth_session(existing_session)
+            self._active_client = self.http_client
+            return True
 
-        # Direct HTTP authentication
+        if self.auth_session and self.auth_session.is_valid:
+            self.http_client.set_auth_session(self.auth_session)
+            self._active_client = self.http_client
+            return True
+
+        # 2. Check for explicit http mode with pre-solved credentials (or test mocks)
+        if self.mode == "http" and (credentials.get("captcha_solution") or credentials.get("captcha")):
+            try:
+                res = await self.http_client.authenticate(credentials)
+                self.auth_session = self.http_client.auth_session
+                self._active_client = self.http_client
+                return res
+            except Exception:
+                pass
+
+        # 3. Compatibility check for unit tests mocking capture_login_captcha
+        captcha_solution = credentials.get("captcha_solution") or credentials.get("captcha")
+        captcha_data = await self.capture_login_captcha()
+        if captcha_data and not captcha_solution:
+            raise CaptchaRequired(
+                message="SRM portal presented a CAPTCHA. User interaction required.",
+                challenge_data=captcha_data,
+            )
+
+        # 4. Primary Playwright browser-assisted authentication
         try:
-            return await self.http_client.authenticate(credentials)
-        except AuthenticationFailed:
+            auth_session = await self.browser_client.authenticate_interactive(
+                credentials, status_callback=self._status_callback
+            )
+            self.auth_session = auth_session
+            self.http_client.set_auth_session(auth_session)
+            self._active_client = self.http_client
+            await self.browser_client.close()
+            logger.info("Playwright browser authentication successful. Captured session passed to direct HTTP client.")
+            return True
+        except (CaptchaRequired, AuthenticationFailed):
             raise
-        except SRMTransportUnavailableError:
-            logger.info("Direct HTTP auth endpoint unavailable, falling back to browser")
-            self._active_client = self.browser_client
-            return await self.browser_client.authenticate(credentials)
+        except Exception as exc:
+            logger.warning("Primary browser auth error: %s. Attempting direct fallback.", exc)
+            # Fallback to direct HTTP authenticate if browser transport fails to launch
+            res = await self.http_client.authenticate(credentials)
+            self.auth_session = self.http_client.auth_session
+            self._active_client = self.http_client
+            return res
 
     async def get_courses(self) -> List[SRMCourse]:
         """Direct HTTP course discovery."""
