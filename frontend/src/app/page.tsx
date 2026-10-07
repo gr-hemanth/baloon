@@ -21,6 +21,8 @@ import {
   CourseItem,
   WorksheetItem,
   JobResponse,
+  launchAuthBrowser,
+  getAuthBrowserStatus,
 } from "../lib/api";
 
 const PIPELINE_STEPS = [
@@ -70,6 +72,11 @@ export default function DashboardPage() {
   const [captchaSolution, setCaptchaSolution] = useState("");
   const [captchaError, setCaptchaError] = useState<string | null>(null);
   const [isSubmittingCaptcha, setIsSubmittingCaptcha] = useState(false);
+
+  // Interactive Browser Launcher State
+  const [isLaunchingBrowser, setIsLaunchingBrowser] = useState(false);
+  const [browserLaunchStatus, setBrowserLaunchStatus] = useState<string | null>(null);
+  const [browserConfirmed, setBrowserConfirmed] = useState(false);
 
   // SRM Authentication Progress State
   const [authPhase, setAuthPhase] = useState<"IDLE" | "AUTHENTICATING" | "WAITING_FOR_CAPTCHA" | "AUTHENTICATED" | "DISCOVERING" | "SUCCESS" | "FAILED">("IDLE");
@@ -399,6 +406,73 @@ export default function DashboardPage() {
     }
   };
 
+  // Launch interactive headed browser on desktop for CAPTCHA solving
+  const handleLaunchInteractiveBrowser = async () => {
+    setIsLaunchingBrowser(true);
+    setBrowserLaunchStatus("Requesting secure interactive login browser window...");
+    setCaptchaError(null);
+
+    try {
+      const payload: any = {};
+      if (captchaContext === "job" && activeJob?.id) {
+        payload.job_id = activeJob.id;
+        payload.user_id = userId;
+        payload.password = password;
+      } else {
+        payload.user_id = userId;
+        payload.password = password;
+      }
+
+      const launchRes = await launchAuthBrowser(payload);
+      setBrowserLaunchStatus(launchRes.message || "Launching browser on your desktop...");
+
+      const query = payload.job_id ? { job_id: payload.job_id } : { request_id: `discovery:${payload.user_id}` };
+      const pollTimer = setInterval(async () => {
+        try {
+          const sData = await getAuthBrowserStatus(query);
+          if (sData.phase === "OPENING_BROWSER") {
+            setBrowserLaunchStatus("Opening Opera / Chromium browser on your screen...");
+          } else if (sData.phase === "WAITING_FOR_CAPTCHA") {
+            setBrowserLaunchStatus("Browser is open! Please solve the visual CAPTCHA in the opened browser window.");
+            setBrowserConfirmed(true);
+          } else if (sData.phase === "AUTHENTICATED") {
+            clearInterval(pollTimer);
+            setBrowserLaunchStatus("Authentication successful! Capturing session...");
+            setBrowserConfirmed(false);
+            setIsLaunchingBrowser(false);
+            setTimeout(async () => {
+              setShowCaptcha(false);
+              setCaptchaChallenge(null);
+              setCaptchaContext(null);
+              if (payload.job_id) {
+                const refreshed = await getJob(payload.job_id);
+                setAndStoreActiveJob(refreshed);
+              } else {
+                handleDiscover({ preventDefault: () => {} } as any);
+              }
+            }, 1200);
+          } else if (sData.phase === "AUTHENTICATION_ERROR" || sData.phase === "TIMED_OUT") {
+            clearInterval(pollTimer);
+            setBrowserLaunchStatus(sData.error_message || "Browser authentication timed out or failed. You may retry.");
+            setIsLaunchingBrowser(false);
+          }
+        } catch (pollErr) {
+          console.warn("Browser status poll error:", pollErr);
+        }
+      }, 1000);
+    } catch (err: any) {
+      setBrowserLaunchStatus(err.message || "Failed to launch browser");
+      setIsLaunchingBrowser(false);
+    }
+  };
+
+  // Auto-launch interactive browser when modal opens without inline image CAPTCHA
+  useEffect(() => {
+    if (showCaptcha && !captchaChallenge?.image_base64 && !isLaunchingBrowser && !browserConfirmed) {
+      handleLaunchInteractiveBrowser();
+    }
+  }, [showCaptcha, captchaChallenge?.image_base64]);
+
   // Submit to SRM confirmation
   const handleConfirmSubmitToSrm = async () => {
     if (!activeJob || isSubmittingToSrm) return;
@@ -705,7 +779,7 @@ export default function DashboardPage() {
                       const allWs = currentCourse.worksheets || [];
                       const availableWs = allWs.filter((w) => w.is_available);
                       const unavailableWs = allWs.filter((w) => !w.is_available);
-                      const sampleWs = unavailableWs[0] || { session: 1, slo: 1, worksheet_id: "1011" };
+                      const sampleWs = unavailableWs.find((w) => (w.session === 209 || (w as any).session_no === 209) && w.slo === 1) || unavailableWs[0] || (currentCourse.course_code === "21CSC203P" ? { session: 209, slo: 1, worksheet_id: "2091" } : { session: 101, slo: 1, worksheet_id: "1011" });
 
                       if (availableWs.length === 0) {
                         return (
@@ -1137,15 +1211,45 @@ export default function DashboardPage() {
             )}
 
             {!captchaChallenge?.image_base64 ? (
-              <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs space-y-2">
+              <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs space-y-3">
                 <p className="font-semibold text-amber-300 flex items-center gap-2">
-                  <span>🖥️</span> Please solve the visual CAPTCHA in the opened SRM window.
+                  <span>🖥️</span> Action Required: Open Login Browser & Solve CAPTCHA
                 </p>
                 <p className="text-slate-300 text-[11px] leading-relaxed">
-                  A headed browser window has opened with the SRM login page. Complete the visual challenge there.
-                  Do not close the browser manually—your authenticated session and token will be captured automatically,
-                  the browser will close, and discovery will continue via direct HTTP.
+                  Interactive browser authentication is required. Click below to open the SRM login window on your screen, complete the visual CAPTCHA, and sign in.
                 </p>
+
+                <div className="pt-1 space-y-2">
+                  <button
+                    type="button"
+                    onClick={handleLaunchInteractiveBrowser}
+                    disabled={isLaunchingBrowser && !browserConfirmed}
+                    className={`w-full py-2.5 px-4 rounded-lg font-medium text-xs flex items-center justify-center gap-2 shadow-lg transition ${
+                      browserConfirmed
+                        ? "bg-amber-600 hover:bg-amber-500 text-white pulse-dot cursor-pointer"
+                        : isLaunchingBrowser
+                        ? "bg-blue-600/70 text-blue-200 cursor-wait"
+                        : "bg-blue-600 hover:bg-blue-500 text-white shadow-blue-600/20 cursor-pointer"
+                    }`}
+                  >
+                    <span>
+                      {browserConfirmed
+                        ? "🌐 Browser Open – Solve CAPTCHA & Sign In"
+                        : isLaunchingBrowser
+                        ? "Launching Browser..."
+                        : "🚀 Open Interactive Login Browser"}
+                    </span>
+                  </button>
+
+                  {browserLaunchStatus && (
+                    <p className={`text-[11px] text-center font-medium ${
+                      browserConfirmed ? "text-amber-300 font-semibold" : "text-blue-300"
+                    }`}>
+                      {browserLaunchStatus}
+                    </p>
+                  )}
+                </div>
+
                 <div className="pt-2 flex justify-end">
                   <button
                     type="button"
@@ -1155,6 +1259,9 @@ export default function DashboardPage() {
                       setCaptchaSolution("");
                       setCaptchaContext(null);
                       setCaptchaError(null);
+                      setBrowserLaunchStatus(null);
+                      setBrowserConfirmed(false);
+                      setIsLaunchingBrowser(false);
                     }}
                     className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition"
                   >
@@ -1164,16 +1271,34 @@ export default function DashboardPage() {
               </div>
             ) : (
               <>
-                <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 flex justify-center">
+                <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 flex flex-col items-center justify-center gap-2">
                   <img
                     src={
                       captchaChallenge.image_base64.startsWith("data:")
                         ? captchaChallenge.image_base64
                         : `data:image/png;base64,${captchaChallenge.image_base64}`
                     }
-                    alt="CAPTCHA"
-                    className="h-12 bg-white px-2 rounded"
+                    alt="CAPTCHA Challenge"
+                    className="h-12 bg-white px-3 py-1 rounded shadow border border-slate-700"
                   />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        setCaptchaError(null);
+                        setCaptchaSolution("");
+                        const resp = await discoverSRMCourses(userId, password, semester, undefined, transportMode);
+                        if (resp.status === "WAITING_FOR_CAPTCHA" && resp.captcha_challenge) {
+                          setCaptchaChallenge(resp.captcha_challenge);
+                        }
+                      } catch (err: any) {
+                        setCaptchaError("Failed to refresh CAPTCHA: " + err.message);
+                      }
+                    }}
+                    className="text-[11px] text-slate-400 hover:text-amber-400 flex items-center gap-1 transition cursor-pointer"
+                  >
+                    <span>🔄</span> Can't read? Refresh challenge
+                  </button>
                 </div>
 
                 <form onSubmit={handleCaptchaSubmit} className="space-y-3">

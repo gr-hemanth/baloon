@@ -479,31 +479,67 @@ class SRMHttpClient(SRMClient):
         Invokes POST /curricula/admin/coursereport/getcoursestatus,
         which returns course sessionCount, slp (DOCX list), slppdf (PDF list),
         slpPractice, and assessment sessions without DOM automation.
+        
+        Targets self.questions_server_url first (where coordinator uploaded worksheets
+        and registers reside), falling back to self.api_base_url.
         """
-        url = f"{self.api_base_url}/curricula/admin/coursereport/getcoursestatus"
         payload = {
             "COURSE_CODE": course_code,
             "key": self.key,
         }
         headers = self._get_auth_headers()
+
+        # 1. Target questions server endpoint where uploaded registers reside
+        primary_url = f"{self.questions_server_url}/curricula/admin/coursereport/getcoursestatus"
+        primary_result: Dict[str, Any] = {}
         try:
-            resp = await self._request_with_retry("POST", url, json_data=payload, headers=headers)
+            resp = await self._request_with_retry("POST", primary_url, json_data=payload, headers=headers)
             data = resp.json()
             if data.get("Status") == 1:
-                result = data.get("result", {})
-                return SRMCourseStatus(
-                    course_code=course_code,
-                    session_count=result.get("sessionCount", []),
-                    available_slp=result.get("slp", []),
-                    available_slppdf=result.get("slppdf", []),
-                    available_practice=result.get("slpPractice", []),
-                    assessments=result.get("assessment", []),
-                    raw_result=result,
-                )
+                primary_result = data.get("result", {})
         except Exception as exc:
-            logger.warning("getcoursestatus query failed for %s: %s", course_code, exc)
+            logger.warning("Questions server getcoursestatus failed for %s: %s", course_code, exc)
 
-        return SRMCourseStatus(course_code=course_code)
+        if primary_result.get("slp") or primary_result.get("slppdf"):
+            return SRMCourseStatus(
+                course_code=course_code,
+                session_count=primary_result.get("sessionCount", []),
+                available_slp=primary_result.get("slp", []),
+                available_slppdf=primary_result.get("slppdf", []),
+                available_practice=primary_result.get("slpPractice", []),
+                assessments=primary_result.get("assessment", []),
+                raw_result=primary_result,
+            )
+
+        # 2. Fallback to api_base_url if primary failed or returned empty registers
+        fallback_url = f"{self.api_base_url}/curricula/admin/coursereport/getcoursestatus"
+        fallback_result: Dict[str, Any] = {}
+        if fallback_url != primary_url:
+            try:
+                resp = await self._request_with_retry("POST", fallback_url, json_data=payload, headers=headers)
+                data = resp.json()
+                if data.get("Status") == 1:
+                    fallback_result = data.get("result", {})
+            except Exception as exc:
+                logger.warning("Fallback getcoursestatus failed for %s: %s", course_code, exc)
+
+        # Merge / fallback: prefer whichever has uploaded slp/slppdf or sessionCount
+        slp = fallback_result.get("slp") or primary_result.get("slp", [])
+        slppdf = fallback_result.get("slppdf") or primary_result.get("slppdf", [])
+        session_count = primary_result.get("sessionCount") or fallback_result.get("sessionCount", [])
+        practice = primary_result.get("slpPractice") or fallback_result.get("slpPractice", [])
+        assessments = primary_result.get("assessment") or fallback_result.get("assessment", [])
+        raw = primary_result or fallback_result
+
+        return SRMCourseStatus(
+            course_code=course_code,
+            session_count=session_count,
+            available_slp=slp,
+            available_slppdf=slppdf,
+            available_practice=practice,
+            assessments=assessments,
+            raw_result=raw,
+        )
 
     async def discover_worksheets(
         self,

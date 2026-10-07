@@ -468,6 +468,9 @@
           </div>
         </div>
         <p class="text-[11px] text-slate-500">Enter the characters exactly as shown above.</p>
+        <button type="button" id="captcha-refresh-btn" onclick="refreshCaptchaInModal()" class="text-[11px] text-slate-400 hover:text-amber-400 flex items-center gap-1 transition cursor-pointer">
+          <i class="fa-solid fa-arrows-rotate text-[10px]"></i> Can't read? Refresh challenge
+        </button>
       </div>
 
       <!-- Solution Form -->
@@ -748,7 +751,7 @@
 
         if (data.status === "WAITING_FOR_CAPTCHA") {
           currentCaptchaContext = "discovery";
-          renderAuthProgress("WAITING_FOR_CAPTCHA", "Waiting for CAPTCHA – Please solve the CAPTCHA in the opened SRM browser window.");
+          renderAuthProgress("WAITING_FOR_CAPTCHA", "Waiting for CAPTCHA – Please enter the 6-character code in the pop-up modal.");
           showCaptchaModal(data.captcha_challenge, async (sol) => {
             let resumeRes = await fetch("/api/v1/srm/discover/resume", {
               method: "POST",
@@ -852,7 +855,7 @@
       const unavailableWs = allWs.filter(w => !w.is_available);
 
       if (availableWs.length === 0) {
-        const sampleWs = unavailableWs[0] || { session: 1, slo: 1, worksheet_id: "1011" };
+        const sampleWs = unavailableWs.find(w => (w.session === 209 || w.session_no === 209) && w.slo === 1) || unavailableWs[0] || (course.course_code === "21CSC203P" ? { session: 209, slo: 1, worksheet_id: "2091" } : { session: 101, slo: 1, worksheet_id: "1011" });
         container.innerHTML = `
           <div class="space-y-3">
             <div class="p-3.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 space-y-2">
@@ -1619,6 +1622,32 @@
         modal.style.display = "none";
       }
       hideCaptchaError();
+    }
+
+    async function refreshCaptchaInModal() {
+      hideCaptchaError();
+      const input = document.getElementById("captcha-solution-input");
+      if (input) input.value = "";
+      if (currentCaptchaContext === "discovery") {
+        const userId = document.getElementById("srm-userid").value.trim();
+        const password = document.getElementById("srm-password").value;
+        const semester = parseInt(document.getElementById("srm-semester").value) || 3;
+        const transportEl = document.getElementById("srm-transport");
+        const transportMode = transportEl ? transportEl.value : "auto";
+        try {
+          const res = await fetch("/api/v1/srm/discover", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ user_id: userId, password: password, semester: semester, transport_mode: transportMode }),
+          });
+          const data = await res.json();
+          if (data.status === "WAITING_FOR_CAPTCHA" && data.captcha_challenge) {
+            showCaptchaModal(data.captcha_challenge, captchaResolver, "discovery");
+          }
+        } catch (err) {
+          showCaptchaError("Failed to refresh CAPTCHA: " + err.message);
+        }
+      }
     }
 
     function cancelCaptchaModal() {

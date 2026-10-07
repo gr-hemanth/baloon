@@ -45,6 +45,20 @@ def reset_ai_circuit_breakers():
     reset_circuit_breakers()
 
 
+@pytest.fixture(autouse=True)
+def reset_auth_state():
+    """Ensure in-memory auth sessions and discovery state are cleared between tests."""
+    from packages.srm.auth_manager import auth_manager
+    from apps.api.routes.srm import _ACTIVE_DISCOVERY_ORCHESTRATORS
+    auth_manager._sessions.clear()
+    auth_manager._requests.clear()
+    _ACTIVE_DISCOVERY_ORCHESTRATORS.clear()
+    yield
+    auth_manager._sessions.clear()
+    auth_manager._requests.clear()
+    _ACTIVE_DISCOVERY_ORCHESTRATORS.clear()
+
+
 @pytest.fixture(scope="function")
 def db_session() -> Generator[Session, None, None]:
     """Provide a clean database session for each test function."""

@@ -163,6 +163,8 @@ class SRMAuthManager:
                 self._sessions[session.user_id] = session
             logger.info("Stored authenticated session for request %s (user: %s)", request_id, session.user_id)
 
+    set_session = store_session
+
     async def get_session(self, identifier: str) -> Optional[SRMAuthSession]:
         """Fetch an authenticated session by job_id or user_id."""
         async with self._lock:

@@ -118,7 +118,15 @@ async def _run_playwright_auth_in_process(
             logger.info("Using Opera / preferred browser executable: %s", preferred_exec)
 
         logger.info("Launching browser (headless=%s, executable=%s) for request %s...", use_headless, preferred_exec, request_id)
-        browser = await pw.chromium.launch(**launch_kwargs)
+        try:
+            browser = await pw.chromium.launch(**launch_kwargs)
+        except Exception as launch_err:
+            if preferred_exec:
+                logger.warning("Preferred browser launch failed (%s). Retrying with default Chromium...", launch_err)
+                launch_kwargs.pop("executable_path", None)
+                browser = await pw.chromium.launch(**launch_kwargs)
+            else:
+                raise
 
         # Attach browser instance to AuthRequest for cleanup tracking
         req = await auth_manager.get_request(request_id)
@@ -140,6 +148,10 @@ async def _run_playwright_auth_in_process(
 
         context = await browser.new_context(**context_kwargs)
         page = await context.new_page()
+        try:
+            await page.bring_to_front()
+        except Exception:
+            pass
 
         captured_login_data: Dict[str, Any] = {}
         auth_error_msg: Optional[str] = None
@@ -350,7 +362,7 @@ async def launch_interactive_auth(
     result_file = temp_dir / f"srm_res_{request_id.replace(':', '_')}_{int(time.time())}.json"
 
     runner_script = Path(__file__).resolve().parent / "desktop_browser_runner.py"
-    python_exe = sys.executable
+    base_arg = f' --base-url "{base_url}"' if base_url else ""
     cmd = (
         f'"{python_exe}" "{runner_script}" '
         f'--request-id "{request_id}" '
@@ -359,6 +371,7 @@ async def launch_interactive_auth(
         f'--result-file "{result_file}" '
         f'--api-url "http://127.0.0.1:8000" '
         f'--timeout {timeout_seconds}'
+        f'{base_arg}'
     )
 
     logger.info("Spawning desktop browser runner on WinSta0\\Default for request %s...", request_id)

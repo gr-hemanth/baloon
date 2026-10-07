@@ -71,15 +71,23 @@ class SRMOrchestrator(SRMClient):
             self._active_client = self.browser_client
             return await self.browser_client.connect()
 
-    async def capture_login_captcha(self) -> Optional[Dict[str, Any]]:
+    async def capture_login_captcha(self, credentials: Optional[Dict[str, Any]] = None, init_if_needed: bool = False) -> Optional[Dict[str, Any]]:
         """Use Playwright to capture login page CAPTCHA (backward compatibility)."""
         if self.mode == "http":
             return None
         try:
-            return await self.browser_client.capture_login_captcha()
+            return await self.browser_client.capture_login_captcha(credentials=credentials, init_if_needed=init_if_needed)
         except Exception as exc:
             logger.warning("Browser CAPTCHA capture unavailable: %s", exc)
             return None
+
+    async def submit_captcha_solution(self, solution: str, credentials: Optional[Dict[str, Any]] = None) -> SRMAuthSession:
+        """Submit CAPTCHA solution to active browser session and extract authenticated session."""
+        auth_session = await self.browser_client.submit_captcha_solution(solution=solution, credentials=credentials)
+        self.auth_session = auth_session
+        self.http_client.set_auth_session(auth_session)
+        self._active_client = self.http_client
+        return auth_session
 
     async def authenticate(self, credentials: Dict[str, Any]) -> bool:
         """Authenticate student with portal credentials.
@@ -113,12 +121,20 @@ class SRMOrchestrator(SRMClient):
 
         # 3. Compatibility check for unit tests mocking capture_login_captcha
         captcha_solution = credentials.get("captcha_solution") or credentials.get("captcha")
-        captcha_data = await self.capture_login_captcha()
+        captcha_data = await self.capture_login_captcha(credentials=credentials)
         if captcha_data and not captcha_solution:
             raise CaptchaRequired(
                 message="SRM portal presented a CAPTCHA. User interaction required.",
                 challenge_data=captcha_data,
             )
+
+        # 3b. If captcha_solution is provided and browser session is active, submit on active page
+        if captcha_solution and self.browser_client._page and not self.browser_client._page.is_closed():
+            auth_session = await self.browser_client.submit_captcha_solution(captcha_solution, credentials=credentials)
+            self.auth_session = auth_session
+            self.http_client.set_auth_session(auth_session)
+            self._active_client = self.http_client
+            return True
 
         # 4. Primary Playwright browser-assisted authentication
         try:

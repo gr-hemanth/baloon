@@ -64,6 +64,7 @@ async def run_desktop_auth(
     result_file: Optional[str] = None,
     timeout_seconds: int = 180,
     force_headless: bool = False,
+    base_url: Optional[str] = None,
 ) -> None:
     """Execute the interactive browser authentication flow on WinSta0\\Default."""
     from packages.srm.browser_launcher import _run_playwright_auth_in_process
@@ -87,6 +88,7 @@ async def run_desktop_auth(
             request_id=request_id,
             user_id=user_id,
             password=password,
+            base_url=base_url,
             timeout_seconds=timeout_seconds,
             status_callback=_on_status,
             force_headless=force_headless,
@@ -136,6 +138,7 @@ def main():
     parser.add_argument("--result-file", default=None, help="Path to write captured session JSON")
     parser.add_argument("--timeout", type=int, default=180, help="CAPTCHA solve timeout in seconds")
     parser.add_argument("--headless", action="store_true", help="Force headless Chromium")
+    parser.add_argument("--base-url", default=None, help="Base portal URL")
 
     args = parser.parse_args()
 
@@ -161,6 +164,7 @@ def main():
         result_file=args.result_file,
         timeout_seconds=args.timeout,
         force_headless=args.headless,
+        base_url=args.base_url,
     ))
 
 

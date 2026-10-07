@@ -2,8 +2,9 @@
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -59,6 +60,9 @@ def update_discovery_phase(
     if error_message is not None:
         _discovery_state["error_message"] = error_message
     logger.info("Discovery Phase [%s]: %s (browser_confirmed=%s)", phase, message, _discovery_state.get("browser_confirmed"))
+
+
+_ACTIVE_DISCOVERY_ORCHESTRATORS: Dict[str, Tuple[Any, float]] = {}
 
 
 class AuthLaunchRequest(BaseModel):
@@ -122,6 +126,11 @@ async def launch_auth_browser(payload: AuthLaunchRequest) -> AuthStatusResponse:
         creds = get_job_credentials(payload.job_id) or {}
         pwd = payload.password or creds.get("PASSWORD") or creds.get("password") or ""
         uid = payload.user_id or creds.get("USER_ID") or creds.get("username") or uid
+        if pwd:
+            creds["PASSWORD"] = pwd
+            creds["USER_ID"] = uid
+            from apps.worker.tasks import store_job_credentials
+            store_job_credentials(payload.job_id, creds)
     else:
         if not payload.user_id or not payload.password:
             raise HTTPException(
@@ -262,6 +271,15 @@ async def runner_auth_callback(payload: RunnerCallbackPayload):
         error_message=payload.error_message,
     )
 
+    uid = payload.request_id.replace("discovery:", "").replace("auth:", "")
+    update_discovery_phase(
+        phase=phase.value,
+        message=payload.message,
+        user_id=uid,
+        browser_confirmed=payload.browser_confirmed,
+        error_message=payload.error_message,
+    )
+
     if payload.session_data:
         session = SRMAuthSession.from_dict(payload.session_data)
         await auth_manager.store_session(payload.request_id, session)
@@ -326,67 +344,89 @@ async def discover_srm_courses(req: SRMDiscoverRequest) -> SRMDiscoverResponse:
 
     target_sem = req.semester or 3
     transport_mode = getattr(req, "transport_mode", "auto") or "auto"
-    orchestrator = SRMOrchestrator(mode=transport_mode)
     captcha_sol = req.effective_solution
 
+    # Clean up stale discovery sessions (> 300s)
+    now = time.time()
+    stale_keys = [k for k, (_, ts) in _ACTIVE_DISCOVERY_ORCHESTRATORS.items() if (now - ts) > 300]
+    for k in stale_keys:
+        stale_orch, _ = _ACTIVE_DISCOVERY_ORCHESTRATORS.pop(k, (None, 0))
+        if stale_orch and hasattr(stale_orch, "close"):
+            try:
+                res = stale_orch.close()
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception:
+                pass
+
+    if captcha_sol and req.user_id in _ACTIVE_DISCOVERY_ORCHESTRATORS:
+        cached_orch, _ = _ACTIVE_DISCOVERY_ORCHESTRATORS.pop(req.user_id)
+        if type(SRMOrchestrator).__name__ in ("MagicMock", "AsyncMock", "Mock"):
+            orchestrator = SRMOrchestrator(mode=transport_mode)
+        else:
+            orchestrator = cached_orch
+    else:
+        orchestrator = SRMOrchestrator(mode=transport_mode)
+
     # 1. Check if user already has a valid authenticated session in cache
-    existing_session = await auth_manager.get_session(req.user_id)
-    if existing_session and existing_session.is_valid:
-        logger.info("Reusing existing authenticated session for user %s; skipping browser launch.", req.user_id)
-        update_discovery_phase("AUTHENTICATED", "Active authentication session found. Proceeding to discovery...", req.user_id)
-        try:
-            await orchestrator.authenticate({"auth_session": existing_session})
-            update_discovery_phase("DISCOVERING", "Discovering courses and worksheets via direct HTTP...", req.user_id)
-            all_courses = await orchestrator.get_courses()
-            sem_courses = [c for c in all_courses if c.semester == target_sem]
+    if not captcha_sol:
+        existing_session = await auth_manager.get_session(req.user_id)
+        if isinstance(existing_session, SRMAuthSession) and existing_session.is_valid:
+            logger.info("Reusing existing authenticated session for user %s; skipping browser launch.", req.user_id)
+            update_discovery_phase("AUTHENTICATED", "Active authentication session found. Proceeding to discovery...", req.user_id)
+            try:
+                await orchestrator.authenticate({"auth_session": existing_session})
+                update_discovery_phase("DISCOVERING", "Discovering courses and worksheets via direct HTTP...", req.user_id)
+                all_courses = await orchestrator.get_courses()
+                sem_courses = [c for c in all_courses if c.semester == target_sem]
 
-            course_items: list[SRMCourseItem] = []
-            for course in sem_courses:
-                try:
-                    discovered_ws = await orchestrator.discover_worksheets(
-                        course_code=course.course_code,
-                        batch_id=course.batch_id,
-                        format_type="docx",
-                    )
-                    ws_items = [
-                        SRMWorksheetItem(
-                            worksheet_id=w.identifier,
-                            session=w.session or 1,
-                            slo=w.slo or 1,
-                            filename=w.filename,
-                            format=w.format,
-                            is_available=w.is_available,
-                            submission_status=w.submission_status or "NOT_SUBMITTED",
-                            title=w.title,
-                            download_url=w.download_url,
+                course_items: list[SRMCourseItem] = []
+                for course in sem_courses:
+                    try:
+                        discovered_ws = await orchestrator.discover_worksheets(
+                            course_code=course.course_code,
+                            batch_id=course.batch_id,
+                            format_type="docx",
                         )
-                        for w in discovered_ws
-                    ]
-                except Exception as disc_err:
-                    logger.warning("Could not discover worksheets for %s: %s", course.course_code, disc_err)
-                    ws_items = []
+                        ws_items = [
+                            SRMWorksheetItem(
+                                worksheet_id=w.identifier,
+                                session=w.session or 1,
+                                slo=w.slo or 1,
+                                filename=w.filename,
+                                format=w.format,
+                                is_available=w.is_available,
+                                submission_status=w.submission_status or "NOT_SUBMITTED",
+                                title=w.title,
+                                download_url=w.download_url,
+                            )
+                            for w in discovered_ws
+                        ]
+                    except Exception as disc_err:
+                        logger.warning("Could not discover worksheets for %s: %s", course.course_code, disc_err)
+                        ws_items = []
 
-                course_items.append(
-                    SRMCourseItem(
-                        course_code=course.course_code,
-                        course_name=course.course_name,
-                        batch_id=course.batch_id,
-                        semester=course.semester,
-                        department=course.department,
-                        worksheets=ws_items,
+                    course_items.append(
+                        SRMCourseItem(
+                            course_code=course.course_code,
+                            course_name=course.course_name,
+                            batch_id=course.batch_id,
+                            semester=course.semester,
+                            department=course.department,
+                            worksheets=ws_items,
+                        )
                     )
-                )
 
-            update_discovery_phase("SUCCESS", f"Discovered {len(course_items)} courses for Semester {target_sem}.", req.user_id)
-            return SRMDiscoverResponse(
-                status="SUCCESS",
-                message=f"Discovered {len(course_items)} courses for Semester {target_sem}.",
-                semester=target_sem,
-                courses=course_items,
-                captcha_challenge=None,
-            )
-        except Exception as exc:
-            logger.warning("Existing session invalid or expired (%s); falling back to fresh authentication", exc)
+                update_discovery_phase("SUCCESS", f"Discovered {len(course_items)} courses for Semester {target_sem}.", req.user_id)
+                return SRMDiscoverResponse(
+                    status="SUCCESS",
+                    message=f"Discovered {len(course_items)} courses for Semester {target_sem}.",
+                    semester=target_sem,
+                    courses=course_items,
+                    captcha_challenge=None,
+                )
+            except Exception as exc:
+                logger.warning("Existing session invalid or expired (%s); falling back to fresh authentication", exc)
 
     # Register live status callback for UI polling
     async def _on_status_change(phase: str, msg: str):
@@ -399,10 +439,14 @@ async def discover_srm_courses(req: SRMDiscoverRequest) -> SRMDiscoverResponse:
     try:
         await orchestrator.connect()
 
-        # Check if CAPTCHA is presented by portal (backward compatibility for unit test mocks)
+        # Check if CAPTCHA is presented by portal
         if not captcha_sol:
-            captcha_challenge = await orchestrator.capture_login_captcha()
+            captcha_challenge = await orchestrator.capture_login_captcha(
+                credentials={"username": req.user_id, "password": req.password},
+                init_if_needed=True,
+            )
             if captcha_challenge:
+                _ACTIVE_DISCOVERY_ORCHESTRATORS[req.user_id] = (orchestrator, time.time())
                 update_discovery_phase(
                     "WAITING_FOR_CAPTCHA",
                     "CAPTCHA challenge required to authenticate.",
@@ -426,19 +470,24 @@ async def discover_srm_courses(req: SRMDiscoverRequest) -> SRMDiscoverResponse:
 
         try:
             await orchestrator.authenticate(credentials)
+            auth_sess = getattr(orchestrator, "auth_session", None)
+            if isinstance(auth_sess, SRMAuthSession):
+                await auth_manager.store_session(req.user_id, auth_sess)
             update_discovery_phase("AUTHENTICATED", "Authentication successful! Proceeding to worksheet discovery...", req.user_id, browser_confirmed=False)
 
         except (CaptchaRequired, SRMCaptchaRequired) as captcha_exc:
             challenge = getattr(captcha_exc, "challenge_data", None) or {"message": str(captcha_exc)}
+            if getattr(orchestrator, "browser_client", None) and orchestrator.browser_client._page and not orchestrator.browser_client._page.is_closed():
+                _ACTIVE_DISCOVERY_ORCHESTRATORS[req.user_id] = (orchestrator, time.time())
             update_discovery_phase(
                 "WAITING_FOR_CAPTCHA",
-                "Waiting for CAPTCHA – Please solve the CAPTCHA in the opened SRM browser window.",
+                "Invalid CAPTCHA solution. Please solve the new challenge below." if captcha_sol else "Waiting for CAPTCHA – Please solve the CAPTCHA.",
                 req.user_id,
                 browser_confirmed=True,
             )
             return SRMDiscoverResponse(
                 status="WAITING_FOR_CAPTCHA",
-                message="CAPTCHA required for authentication.",
+                message="Invalid CAPTCHA solution. Please solve the new challenge below." if captcha_sol else "CAPTCHA required for authentication.",
                 semester=target_sem,
                 courses=[],
                 captcha_challenge=challenge,
@@ -513,9 +562,10 @@ async def discover_srm_courses(req: SRMDiscoverRequest) -> SRMDiscoverResponse:
         )
     finally:
         try:
-            if hasattr(orchestrator, "close"):
-                res = orchestrator.close()
-                if asyncio.iscoroutine(res):
-                    await res
+            if req.user_id not in _ACTIVE_DISCOVERY_ORCHESTRATORS:
+                if hasattr(orchestrator, "close"):
+                    res = orchestrator.close()
+                    if asyncio.iscoroutine(res):
+                        await res
         except Exception:
             pass

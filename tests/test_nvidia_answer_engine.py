@@ -619,3 +619,208 @@ async def test_controlled_real_nvidia_generation():
     assert "```" not in ans.answer_text
     # Persona: authentic student tone, no conversational filler
     assert "certainly" not in ans.answer_text.lower()
+
+
+# ==============================================================================
+# TEST 13-19: RESILIENT JSON PARSING, REASONING TAGS & RETRY REGRESSION TESTS
+# ==============================================================================
+
+def _create_custom_nvidia_response(content_str: str) -> httpx.Response:
+    response_json = {
+        "id": "chatcmpl-nv-test-custom",
+        "object": "chat.completion",
+        "created": 1715000000,
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content_str,
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 100, "total_tokens": 200},
+    }
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {"content-type": "application/json"}
+    mock_resp.json.return_value = response_json
+    mock_resp.text = json.dumps(response_json)
+    return mock_resp
+
+
+@pytest.mark.asyncio
+async def test_nvidia_handles_dict_of_answers_keyed_by_question_id():
+    """Verify handling of {'answers': {'q_1': {'answer_text': '...'}}} dict format."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    content = json.dumps({
+        "answers": {
+            "q_1": {"answer_text": "Virtual memory provides an illusion of large memory."},
+            "q_2": {"answer_text": "Page fault occurs when page is not in physical memory."}
+        }
+    })
+    mock_client.post.return_value = _create_custom_nvidia_response(content)
+
+    engine = LLMAnswerEngine(provider="nvidia", api_key="nvapi-mock-key", http_client=mock_client)
+    ws = _create_sample_parsed_worksheet()
+    result = await engine.generate_answers(ws)
+
+    assert len(result.answers) >= 2
+    assert result.answers[0].status == AnswerStatus.SUCCESS
+    assert "Virtual memory" in result.answers[0].answer_text
+
+
+@pytest.mark.asyncio
+async def test_nvidia_handles_flat_dict_of_answers():
+    """Verify handling of {'q_1': '...', 'q_2': '...'} flat string dictionary."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    content = json.dumps({
+        "q_1": "Virtual memory maps virtual addresses to physical pages.",
+        "q_2": "A page fault triggers OS trap to load the page from disk."
+    })
+    mock_client.post.return_value = _create_custom_nvidia_response(content)
+
+    engine = LLMAnswerEngine(provider="nvidia", api_key="nvapi-mock-key", http_client=mock_client)
+    ws = _create_sample_parsed_worksheet()
+    result = await engine.generate_answers(ws)
+
+    assert len(result.answers) >= 2
+    assert result.answers[0].status == AnswerStatus.SUCCESS
+    assert "Virtual memory" in result.answers[0].answer_text
+
+
+@pytest.mark.asyncio
+async def test_nvidia_handles_reasoning_and_fenced_json():
+    """Verify handling of <think> reasoning tags, preamble, and markdown fences."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    raw_content = (
+        "<think>Let us analyze question 1 and question 2 carefully.</think>\n"
+        "Here is the requested answers JSON output:\n"
+        "```json\n"
+        "{\n"
+        '  "answers": [\n'
+        '    {"question_id": "q_1", "answer_text": "Virtual memory separates logical and physical space."},\n'
+        '    {"question_id": "q_2", "answer_text": "Page fault is an interrupt raised by MMU."}\n'
+        "  ]\n"
+        "}\n"
+        "```\n"
+        "Please let me know if you need further clarifications."
+    )
+    mock_client.post.return_value = _create_custom_nvidia_response(raw_content)
+
+    engine = LLMAnswerEngine(provider="nvidia", api_key="nvapi-mock-key", http_client=mock_client)
+    ws = _create_sample_parsed_worksheet()
+    result = await engine.generate_answers(ws)
+
+    assert len(result.answers) >= 2
+    assert result.answers[0].status == AnswerStatus.SUCCESS
+    assert "Virtual memory" in result.answers[0].answer_text
+
+
+@pytest.mark.asyncio
+async def test_nvidia_handles_nested_wrapper_keys():
+    """Verify handling of {'worksheet_answers': [...]} or {'response': {'answers': [...]}}."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    content = json.dumps({
+        "worksheet_answers": [
+            {"question_id": "q_1", "answer_text": "Logical address space isolation."},
+            {"question_id": "q_2", "answer_text": "MMU translation missing entry."}
+        ]
+    })
+    mock_client.post.return_value = _create_custom_nvidia_response(content)
+
+    engine = LLMAnswerEngine(provider="nvidia", api_key="nvapi-mock-key", http_client=mock_client)
+    ws = _create_sample_parsed_worksheet()
+    result = await engine.generate_answers(ws)
+
+    assert len(result.answers) >= 2
+    assert result.answers[0].status == AnswerStatus.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_nvidia_question_id_normalization_and_positional_fallback():
+    """Verify questions match by number or positional fallback when model uses generic numbers."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    content = json.dumps({
+        "answers": [
+            {"question_id": "1", "answer_text": "First answer matching question 1."},
+            {"question_id": "2", "answer_text": "Second answer matching question 2."}
+        ]
+    })
+    mock_client.post.return_value = _create_custom_nvidia_response(content)
+
+    engine = LLMAnswerEngine(provider="nvidia", api_key="nvapi-mock-key", http_client=mock_client)
+    ws = _create_sample_parsed_worksheet()
+    result = await engine.generate_answers(ws)
+
+    assert len(result.answers) >= 2
+    assert result.answers[0].status == AnswerStatus.SUCCESS
+    assert "First answer" in result.answers[0].answer_text
+
+
+@pytest.mark.asyncio
+async def test_nvidia_retries_on_initial_schema_error_and_succeeds():
+    """Verify that an initial invalid/empty output retries and succeeds on attempt 2."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    good_content = json.dumps({
+        "answers": [
+            {"question_id": "q_1", "answer_text": "Recovered answer on attempt 2."},
+            {"question_id": "q_2", "answer_text": "Recovered answer 2."}
+        ]
+    })
+    mock_client.post.side_effect = [
+        _create_custom_nvidia_response("Not JSON at all"),
+        _create_custom_nvidia_response(good_content),
+    ]
+
+    engine = LLMAnswerEngine(provider="nvidia", api_key="nvapi-mock-key", max_retries=2, retry_backoff=0.01, http_client=mock_client)
+    ws = _create_sample_parsed_worksheet()
+    result = await engine.generate_answers(ws)
+
+    assert mock_client.post.call_count == 2
+    assert len(result.answers) >= 2
+    assert "Recovered answer" in result.answers[0].answer_text
+
+
+@pytest.mark.asyncio
+async def test_nvidia_falls_back_to_secondary_model_on_schema_error():
+    """Verify model fallback when primary model repeatedly returns invalid schema."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.is_closed = False
+    fallback_model_content = json.dumps({
+        "answers": [
+            {"question_id": "q_1", "answer_text": "Answer from fallback model."},
+            {"question_id": "q_2", "answer_text": "Answer 2 from fallback model."}
+        ]
+    })
+
+    # Primary model fails all retries (2 calls with {}), then fallback model succeeds (1 call)
+    mock_client.post.side_effect = [
+        _create_custom_nvidia_response("{}"),
+        _create_custom_nvidia_response("{}"),
+        _create_custom_nvidia_response(fallback_model_content),
+    ]
+
+    engine = LLMAnswerEngine(
+        provider="nvidia",
+        api_key="nvapi-mock-key",
+        model="primary-model",
+        model_fallbacks=["fallback-model"],
+        max_retries=1,
+        retry_backoff=0.01,
+        http_client=mock_client,
+    )
+    ws = _create_sample_parsed_worksheet()
+    result = await engine.generate_answers(ws)
+
+    assert mock_client.post.call_count == 3
+    assert len(result.answers) >= 2
+    assert "Answer from fallback model" in result.answers[0].answer_text

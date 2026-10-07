@@ -414,3 +414,41 @@ export function getStatusUI(status?: string): StatusUIInfo {
     textClass: "text-slate-400",
   };
 }
+
+export interface AuthLaunchResponse {
+  request_id: string;
+  phase: string;
+  message: string;
+  browser_confirmed: boolean;
+  is_authenticated: boolean;
+  error_message?: string;
+}
+
+export async function launchAuthBrowser(params: {
+  job_id?: string;
+  user_id?: string;
+  password?: string;
+  timeout_seconds?: number;
+}): Promise<AuthLaunchResponse> {
+  const res = await fetch(`${API_BASE}/srm/auth/launch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || "Failed to launch login browser");
+  }
+  return res.json();
+}
+
+export async function getAuthBrowserStatus(params: {
+  job_id?: string;
+  request_id?: string;
+}): Promise<AuthLaunchResponse> {
+  const query = params.job_id ? `job_id=${params.job_id}` : `request_id=${params.request_id}`;
+  const res = await fetch(`${API_BASE}/srm/auth/status?${query}`);
+  if (!res.ok) throw new Error("Failed to fetch browser auth status");
+  return res.json();
+}
+

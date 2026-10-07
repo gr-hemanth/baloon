@@ -113,13 +113,18 @@ def is_transient_error(exc: Exception) -> bool:
         return True
     if isinstance(exc, LLMRateLimitError):
         return True
+    if isinstance(exc, MissingAnswerError):
+        return True
     if isinstance(exc, LLMResponseError):
         if exc.status_code in (500, 502, 503, 504):
             return True
         if exc.status_code in (400, 401, 403, 404, 410):
             return False
+        # Stochastic LLM output variations (JSON format, schema structure, empty content)
+        if exc.status_code is None:
+            return True
         err_str = str(exc).lower()
-        if any(c in err_str for c in ("500", "502", "503", "504", "overloaded", "unavailable", "timed out")):
+        if any(c in err_str for c in ("500", "502", "503", "504", "overloaded", "unavailable", "timed out", "json", "answer")):
             return True
         return False
     return False
@@ -1913,13 +1918,17 @@ class LLMAnswerEngine(BaseAnswerEngine):
                         break
 
             # If this model failed and another fallback model exists within provider, try next model
-            # Model fallback is designed for model-specific errors (503 overloaded, 404, 410, 422, 400), not network timeouts
+            # Model fallback is designed for model-specific errors (503 overloaded, 404, 410, 422, 400, schema mismatch), not network timeouts
             is_model_specific = (
-                isinstance(last_error, LLMResponseError)
+                isinstance(last_error, (LLMResponseError, MissingAnswerError))
+                and not isinstance(last_error, (LLMTimeoutError, LLMNetworkError))
                 and (
-                    last_error.status_code in (503, 404, 410, 422, 400)
+                    getattr(last_error, "status_code", None) in (503, 404, 410, 422, 400)
+                    or getattr(last_error, "status_code", None) is None
                     or "overloaded" in str(last_error).lower()
                     or "model" in str(last_error).lower()
+                    or "json" in str(last_error).lower()
+                    or "answers" in str(last_error).lower()
                 )
             )
             if is_model_specific and (model_idx + 1 < len(models_to_try)):
@@ -2040,11 +2049,14 @@ class LLMAnswerEngine(BaseAnswerEngine):
         answers_by_num: Dict[str, Dict[str, Any]] = {}
 
         logger.info("[AI Parsed Answers List] count=%d data=%s", len(answers_list), json.dumps(answers_list)[:500])
-        for ans_dict in answers_list:
+        for idx, ans_dict in enumerate(answers_list):
+            if isinstance(ans_dict, str):
+                ans_dict = {"answer_text": ans_dict, "question_id": f"q_{idx+1}"}
             if isinstance(ans_dict, dict):
                 qid = str(ans_dict.get("question_id", "")).strip()
                 if qid:
                     answers_by_id[qid] = ans_dict
+                    answers_by_id[qid.lower()] = ans_dict
                 qnum = str(ans_dict.get("question_number", "")).strip()
                 if qnum:
                     answers_by_num[qnum] = ans_dict
@@ -2053,14 +2065,31 @@ class LLMAnswerEngine(BaseAnswerEngine):
         missing_count = 0
 
         for idx, question in enumerate(worksheet.questions):
-            ans_data = answers_by_id.get(question.question_id)
+            ans_data = answers_by_id.get(question.question_id) or answers_by_id.get(question.question_id.lower())
             if not ans_data and question.question_number:
-                ans_data = answers_by_num.get(str(question.question_number))
-            if not ans_data and len(worksheet.questions) == len(answers_list) and idx < len(answers_list):
-                # Fallback to positional mapping when count matches
+                qnum_str = str(question.question_number)
+                ans_data = (
+                    answers_by_num.get(qnum_str)
+                    or answers_by_id.get(qnum_str)
+                    or answers_by_id.get(f"q_{qnum_str}")
+                    or answers_by_id.get(f"q{qnum_str}")
+                    or answers_by_id.get(f"question_{qnum_str}")
+                    or answers_by_id.get(f"question {qnum_str}")
+                )
+            if not ans_data:
+                # Positional question id or batch index: e.g. q_1, 1 for 1st question in batch
+                pos_str = str(idx + 1)
+                ans_data = (
+                    answers_by_id.get(f"q_{pos_str}")
+                    or answers_by_id.get(f"q{pos_str}")
+                    or answers_by_num.get(pos_str)
+                )
+            if not ans_data and idx < len(answers_list):
                 candidate = answers_list[idx]
                 if isinstance(candidate, dict):
                     ans_data = candidate
+                elif isinstance(candidate, str):
+                    ans_data = {"answer_text": candidate}
 
             if ans_data:
                 ans_text = str(
@@ -2429,34 +2458,79 @@ class LLMAnswerEngine(BaseAnswerEngine):
         if not raw_content or not str(raw_content).strip():
             raise LLMResponseError(f"{self.provider.upper()} returned empty content in message.")
 
-        # Clean JSON in case model wrapped it in markdown fences
+        # Clean JSON in case model wrapped it in markdown fences, preamble, or reasoning tags
         cleaned_json = str(raw_content).strip()
-        if cleaned_json.startswith("```"):
-            lines = cleaned_json.splitlines()
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            cleaned_json = "\n".join(lines).strip()
+        # 1. Remove reasoning tags if any (e.g. <think>...</think>)
+        cleaned_json = re.sub(r"<think>[\s\S]*?</think>", "", cleaned_json).strip()
 
+        # 2. Extract markdown code block if present
+        fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned_json)
+        candidate = fenced_match.group(1).strip() if fenced_match else cleaned_json
+
+        parsed_output = None
         try:
-            parsed_output = json.loads(cleaned_json)
-        except Exception as exc:
-            raise LLMResponseError(
-                f"Malformed JSON in {self.provider.upper()} text output: {exc}",
-                raw_response=str(raw_content),
-            ) from exc
+            parsed_output = json.loads(candidate)
+        except Exception:
+            # Try to extract the first { ... } or [ ... ]
+            obj_match = re.search(r"(\{[\s\S]*\})", candidate)
+            arr_match = re.search(r"(\[[\s\S]*\])", candidate)
+            for m in (obj_match, arr_match):
+                if m:
+                    try:
+                        parsed_output = json.loads(m.group(1))
+                        break
+                    except Exception:
+                        pass
+
+        if parsed_output is None:
+            try:
+                parsed_output = json.loads(cleaned_json)
+            except Exception as exc:
+                raise LLMResponseError(
+                    f"Malformed JSON in {self.provider.upper()} text output: {exc}",
+                    raw_response=str(raw_content),
+                ) from exc
 
         answers_list = None
         if isinstance(parsed_output, list):
             answers_list = parsed_output
         elif isinstance(parsed_output, dict):
-            for key in ("answers", "results", "questions", "data", "responses"):
-                if key in parsed_output and isinstance(parsed_output[key], list):
-                    answers_list = parsed_output[key]
-                    break
+            # Check direct or wrapper keys
+            for key in (
+                "answers", "results", "questions", "data", "responses",
+                "worksheet", "worksheet_answers", "solutions", "question_answers",
+                "items", "answer_list", "answers_list", "questions_answers",
+                "output", "response"
+            ):
+                if key in parsed_output:
+                    val = parsed_output[key]
+                    if isinstance(val, list):
+                        answers_list = val
+                        break
+                    elif isinstance(val, dict):
+                        # Nested dict inside wrapper, e.g. {"worksheet": {"answers": [...]}}
+                        for inner_key in ("answers", "results", "questions", "data", "responses", "solutions", "items"):
+                            if inner_key in val and isinstance(val[inner_key], list):
+                                answers_list = val[inner_key]
+                                break
+                        if answers_list is not None:
+                            break
+                        # Or {"answers": {"q_1": {...}, "q_2": {...}}} or {"answers": {"q_1": "text"}}
+                        candidate_list = []
+                        for sub_k, sub_v in val.items():
+                            if isinstance(sub_v, dict):
+                                item = dict(sub_v)
+                                if "question_id" not in item:
+                                    item["question_id"] = sub_k
+                                candidate_list.append(item)
+                            elif isinstance(sub_v, str):
+                                candidate_list.append({"question_id": sub_k, "answer_text": sub_v})
+                        if candidate_list:
+                            answers_list = candidate_list
+                            break
+
+            # If answers_list still None, check if top-level dict is keyed by question_id or question number
             if answers_list is None:
-                # Check if dict is keyed by question_id (e.g. {"q_1": {...}, ...})
                 candidate_list = []
                 for k, v in parsed_output.items():
                     if isinstance(v, dict):
@@ -2464,6 +2538,8 @@ class LLMAnswerEngine(BaseAnswerEngine):
                         if "question_id" not in item:
                             item["question_id"] = k
                         candidate_list.append(item)
+                    elif isinstance(v, str):
+                        candidate_list.append({"question_id": k, "answer_text": v})
                 if candidate_list:
                     answers_list = candidate_list
 

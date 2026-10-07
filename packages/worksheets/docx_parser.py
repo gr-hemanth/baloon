@@ -99,10 +99,13 @@ class DocxNumberingResolver:
         self._load_numbering_part()
 
     def _load_numbering_part(self) -> None:
-        if not hasattr(self.doc.part, "numbering_part") or self.doc.part.numbering_part is None:
-            return
         try:
-            num_part_el = self.doc.part.numbering_part._element
+            num_part = getattr(self.doc.part, "numbering_part", None)
+            if num_part is None:
+                return
+            num_part_el = num_part._element
+        except Exception:
+            return
             W = self.W_NS
             for num in num_part_el.iter(f"{W}num"):
                 num_id = num.get(f"{W}numId")

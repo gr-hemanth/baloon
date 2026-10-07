@@ -82,14 +82,14 @@ def spawn_process_on_default_desktop(cmd: str) -> int:
 
     pi = PROCESS_INFORMATION()
 
-    logger.info("Spawning desktop process on WinSta0\\Default: %s", cmd[:60] + "...")
+    CREATE_NEW_CONSOLE = 0x00000010
     success = kernel32.CreateProcessW(
         None,
         cmd,
         None,
         None,
         False,
-        0,
+        CREATE_NEW_CONSOLE,
         None,
         None,
         ctypes.byref(si),
